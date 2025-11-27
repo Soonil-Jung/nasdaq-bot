@@ -1,0 +1,37 @@
+name: Nasdaq Market Watch
+
+on:
+  schedule:
+    # 1. 프리장 시작 전 (한국 17:50) -> UTC 08:50
+    - cron: '50 8 * * 1-5'
+    
+    # 2. 정규장 시작 전 (한국 23:10) -> UTC 14:10
+    # (겨울 썸머타임 해제 기준, 장 시작 20분 전 미리 알림)
+    - cron: '10 14 * * 1-5'
+    
+    # 3. 장 마감 직전 (한국 05:50) -> UTC 20:50
+    - cron: '50 20 * * 1-5'
+
+  workflow_dispatch: # 수동 실행 버튼 (테스트용)
+
+jobs:
+  run-analysis:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+          
+      - name: Install Dependencies
+        run: |
+          pip install -r requirements.txt
+          
+      - name: Run Alert Bot
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python main.py
