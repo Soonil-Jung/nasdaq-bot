@@ -17,13 +17,12 @@ TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
 
 class DangerAlertBot:
     def __init__(self):
-        print("🤖 AI 시스템(Trend Ver) 가동 중...")
+        print("🤖 AI 시스템(Dashboard Ver) 가동 중...")
         try:
             self.tokenizer = BertTokenizer.from_pretrained('ProsusAI/finbert')
             self.model = BertForSequenceClassification.from_pretrained('ProsusAI/finbert')
             self.nlp = pipeline("sentiment-analysis", model=self.model, tokenizer=self.tokenizer)
-        except:
-            pass
+        except: pass
         self.keywords = ['Jerome Powell', 'Donald Trump', 'Fed Rate', 'Recession', 'Nasdaq']
 
     def send_telegram(self, message):
@@ -55,100 +54,170 @@ class DangerAlertBot:
 
     def get_market_data(self):
         try:
-            # VIX(공포지수) 추가 다운로드
-            df = yf.download('NQ=F', period='5d', interval='1h', progress=False)
-            df_vol = yf.download('QQQ', period='5d', interval='1h', progress=False)
-            vix = yf.download('^VIX', period='5d', interval='1h', progress=False) # 공포지수
+            # 주요 지표 6종 수집
+            tickers = ['NQ=F', 'QQQ', '^VIX', 'DX-Y.NYB', 'SOXX', 'HYG', '^TNX']
+            data = yf.download(tickers, period='5d', interval='1h', progress=False)
 
-            if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
-            if isinstance(df_vol.columns, pd.MultiIndex): df_vol.columns = df_vol.columns.get_level_values(0)
-            if isinstance(vix.columns, pd.MultiIndex): vix.columns = vix.columns.get_level_values(0)
+            if isinstance(data.columns, pd.MultiIndex): 
+                df = pd.DataFrame()
+                df['Close'] = data['Close']['NQ=F']
+                df['High'] = data['High']['NQ=F']
+                df['Low'] = data['Low']['NQ=F']
+                df['Volume'] = data['Volume']['QQQ']
+                df['VIX'] = data['Close']['^VIX']
+                df['DXY'] = data['Close']['DX-Y.NYB']
+                df['SOXX'] = data['Close']['SOXX']
+                df['HYG'] = data['Close']['HYG']
+                df['TNX'] = data['Close']['^TNX']
+            else: return pd.DataFrame()
 
             if df.empty: return pd.DataFrame()
 
-            df = df[['High', 'Low', 'Close']].copy()
             df.index = pd.to_datetime(df.index).tz_localize(None)
-            df_vol.index = pd.to_datetime(df_vol.index).tz_localize(None)
-            vix.index = pd.to_datetime(vix.index).tz_localize(None)
-
-            df['Volume'] = df_vol['Volume'].reindex(df.index).fillna(0)
-            # VIX 데이터 병합 (결측치는 앞뒤 값으로 채움)
-            df['VIX'] = vix['Close'].reindex(df.index).ffill().bfill().fillna(20.0)
-            
-            return df.dropna(subset=['Close'])
+            df = df.ffill().bfill()
+            return df.dropna()
         except: return pd.DataFrame()
 
     def analyze_danger(self):
         df = self.get_market_data()
         if df.empty: return
 
-        # 1. 기술적 지표 계산
+        # --- 1. 데이터 및 지표 계산 ---
+        # A. 기술적 지표
         df['Vol_MA20'] = df['Volume'].rolling(window=20).mean()
         ichimoku = IchimokuIndicator(high=df['High'], low=df['Low'], window1=9, window2=26, window3=52)
         span_a = ichimoku.ichimoku_a().iloc[-1]
+        span_b = ichimoku.ichimoku_b().iloc[-1]
         
-        # 2. 변화량(Trend) 계산 [사용자 요청 반영]
+        rsi_val = RSIIndicator(close=df['Close'], window=14).rsi().iloc[-1]
         current_close = df['Close'].iloc[-1]
         
-        # VIX 추세 (현재값 - 5시간 평균)
+        # B. 매크로 및 섹터 데이터
         current_vix = df['VIX'].iloc[-1]
-        vix_ma5 = df['VIX'].rolling(window=5).mean().iloc[-1]
-        vix_trend = current_vix - vix_ma5 
+        vix_trend = current_vix - df['VIX'].rolling(window=5).mean().iloc[-1]
         
-        # RSI 추세 (현재값 - 직전값)
-        rsi_series = RSIIndicator(close=df['Close'], window=14).rsi()
-        current_rsi = rsi_series.iloc[-1]
-        prev_rsi = rsi_series.iloc[-2]
-        rsi_trend = current_rsi - prev_rsi
+        current_dxy = df['DXY'].iloc[-1]
+        dxy_chg = (current_dxy - df['DXY'].iloc[-24]) / df['DXY'].iloc[-24] * 100 # 24시간 전 대비 변화율
+        
+        current_tnx = df['TNX'].iloc[-1]
+        
+        # 반도체 상대 강도
+        nq_ret = df['Close'].iloc[-1] / df['Close'].iloc[-5] - 1
+        soxx_ret = df['SOXX'].iloc[-1] / df['SOXX'].iloc[-5] - 1
+        semi_weakness = nq_ret - soxx_ret 
+
+        # 하이일드 채권 (자금 이탈)
+        hyg_ma20 = df['HYG'].rolling(window=20).mean().iloc[-1]
+        current_hyg = df['HYG'].iloc[-1]
 
         news_score = self.get_news_sentiment()
-        
-        # 3. 위험 점수 산출
+
+        # --- 2. 위험 점수 산출 ---
         danger_score = 0
         reasons = []
-        
-        # [A] 구름대 이탈
-        if current_close < span_a: 
-            danger_score += 30
+
+        # [A] 구름대
+        cloud_status = "구름대 위 (안정)"
+        if current_close < span_a:
+            danger_score += 25
             reasons.append("☁️ 구름대 이탈")
-        
-        # [B] 거래량 폭증
+            cloud_status = "구름대 하단 이탈 ☁️"
+        elif current_close < span_b: # 구름대 안
+            cloud_status = "구름대 진입 (혼조)"
+
+        # [B] 거래량
         avg_vol = df['Vol_MA20'].iloc[-1]
         vol_ratio = 0 if avg_vol == 0 else df['Volume'].iloc[-1] / avg_vol
+        vol_status = f"평소의 {int(vol_ratio*100)}%"
         if vol_ratio > 1.5:
-            danger_score += 20
+            danger_score += 15
             reasons.append(f"📢 거래량 급증 ({vol_ratio:.1f}배)")
-            
-        # [C] 공포지수 급상승 (Trend) ★
-        # VIX가 평균보다 높고, 계속 상승 중이라면?
-        if vix_trend > 0.5: # 공포가 확산 중
-            danger_score += 20
-            reasons.append(f"😱 공포지수 상승세 (VIX: {current_vix:.1f}, 추세: ↗)")
-            
-        # [D] 매수심리 급랭 (Trend) ★
-        # RSI가 하락 추세라면?
-        if rsi_trend < -3:
-            danger_score += 15
-            reasons.append(f"📉 매수심리 위축 (RSI변화: {rsi_trend:.1f})")
+            vol_status += " (폭증) 🚨"
 
-        # [E] 뉴스 악재
-        if news_score < -0.2: 
+        # [C] 달러
+        dxy_status = f"{current_dxy:.2f} ({dxy_chg:+.2f}%)"
+        if dxy_chg > 0.3:
             danger_score += 15
-            reasons.append(f"📰 뉴스 악재 ({news_score:.2f})")
+            reasons.append(f"💵 달러 급등 (+{dxy_chg:.2f}%)")
+            dxy_status += " 🔺"
 
-        # 메시지 전송
-        status = '🔴 위험 (매도)' if danger_score >= 70 else '🟡 주의 (관망)' if danger_score >= 40 else '🟢 안정 (매수)'
+        # [D] 반도체
+        semi_status = "양호"
+        if semi_weakness > 0.005:
+            danger_score += 15
+            reasons.append("📉 반도체 상대적 약세")
+            semi_status = "나스닥 대비 약세 ⚠️"
+
+        # [E] 스마트머니
+        hyg_status = "유입 중"
+        if current_hyg < hyg_ma20:
+            danger_score += 15
+            reasons.append("💸 스마트머니(HYG) 이탈")
+            hyg_status = "자금 이탈 감지 ⚠️"
+
+        # [F] 공포지수
+        vix_status = f"{current_vix:.2f}"
+        if vix_trend > 0.5:
+            danger_score += 15
+            reasons.append("😱 공포지수 확산")
+            vix_status += " (확산 중 ↗)"
+        else:
+            vix_status += " (안정 ↘)"
+
+        # [G] 뉴스
+        news_status = f"{news_score:.2f}"
+        if news_score < -0.2:
+            danger_score += 10
+            reasons.append("📰 뉴스 심리 악화")
+            news_status += " (악재 우세) ⚠️"
+        elif news_score > 0.2:
+            news_status += " (호재 우세) 😊"
+        else:
+            news_status += " (중립) 😐"
+
+        # RSI 상태 텍스트
+        rsi_status = f"{rsi_val:.1f}"
+        if rsi_val < 30: rsi_status += " (과매도) 📉"
+        elif rsi_val > 70: rsi_status += " (과매수) 📈"
+        else: rsi_status += " (중립)"
+
+        # 점수 보정
+        danger_score = min(danger_score, 100)
+
+        # --- 3. 메시지 작성 (Dashboard Style) ---
+        status_emoji = '🔴 위험 (매도)' if danger_score >= 60 else '🟡 주의 (관망)' if danger_score >= 35 else '🟢 안정 (매수)'
         
         now_kst = datetime.now() + timedelta(hours=9)
-        msg = f"🔔 [AI 시장 감시 - GitHub]\n시간: {now_kst.strftime('%Y-%m-%d %H:%M')} (KST)\n"
-        msg += f"상태: {status} (점수: {danger_score})\n"
         
-        if reasons: msg += "\n".join(["- " + r for r in reasons])
-        else: msg += "- 특이사항 없음"
+        msg = f"🔔 [AI 시장 정밀 분석 리포트]\n"
+        msg += f"📅 {now_kst.strftime('%Y-%m-%d %H:%M')} (KST)\n\n"
+        msg += f"🚦 종합 진단: {status_emoji}\n"
+        msg += f"🔥 위험 점수: {danger_score}점 / 100점\n\n"
         
-        msg += f"\n\n📊 VIX지수: {current_vix:.2f} ({'상승중 ↗' if vix_trend>0 else '하락중 ↘'})"
-        msg += f"\n📈 나스닥: {current_close:.2f}"
+        msg += "───────────────\n"
+        msg += "1️⃣ 매크로 & 수급 (Market Health)\n"
+        msg += f"💵 달러 인덱스 : {dxy_status}\n"
+        msg += f"🏦 국채금리(10Y): {current_tnx:.2f}%\n"
+        msg += f"💸 하이일드(HYG): {hyg_status}\n"
+        msg += f"📉 반도체(SOXX) : {semi_status}\n\n"
         
+        msg += "2️⃣ 기술적 분석 (Technical)\n"
+        msg += f"📈 나스닥 선물 : {current_close:,.2f}\n"
+        msg += f"📊 거래량 강도 : {vol_status}\n"
+        msg += f"☁️ 일목균형표 : {cloud_status}\n"
+        msg += f"📉 RSI (14)   : {rsi_status}\n\n"
+        
+        msg += "3️⃣ 심리 지표 (Sentiment)\n"
+        msg += f"😱 공포지수(VIX): {vix_status}\n"
+        msg += f"📰 뉴스 투심   : {news_status}\n"
+        msg += "───────────────\n\n"
+        
+        msg += "📋 [상세 위험 요인 분석]\n"
+        if reasons:
+            msg += "\n".join(["- " + r for r in reasons])
+        else:
+            msg += "- 특이사항 없음 (모든 지표 안정적)"
+
         self.send_telegram(msg)
 
 if __name__ == "__main__":
