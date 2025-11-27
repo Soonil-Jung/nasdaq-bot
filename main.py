@@ -9,33 +9,44 @@ from transformers import BertTokenizer, BertForSequenceClassification, pipeline
 from GoogleNews import GoogleNews
 from datetime import datetime
 
-# --- 환경 변수 ---
-TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
-TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
+# ======================================================
+# ▼▼▼ 여기에 정보를 직접 입력하세요 (따옴표 필수!) ▼▼▼
+TELEGRAM_TOKEN = "7961108822:AAG1gMSmtDuJ5F7P29szagNri6OvDzZeQGg" 
+TELEGRAM_CHAT_ID = "6376538116"
+# ======================================================
 
 class DangerAlertBot:
     def __init__(self):
-        print("🤖 AI 시스템(Cloud Ver) 가동... (Hourly Check)")
-        # FinBERT 모델 로딩
-        self.tokenizer = BertTokenizer.from_pretrained('ProsusAI/finbert')
-        self.model = BertForSequenceClassification.from_pretrained('ProsusAI/finbert')
-        self.nlp = pipeline("sentiment-analysis", model=self.model, tokenizer=self.tokenizer)
+        print("🤖 AI 시스템 가동 중... (잠시만 기다려주세요)")
+        try:
+            self.tokenizer = BertTokenizer.from_pretrained('ProsusAI/finbert')
+            self.model = BertForSequenceClassification.from_pretrained('ProsusAI/finbert')
+            self.nlp = pipeline("sentiment-analysis", model=self.model, tokenizer=self.tokenizer)
+            print("✅ AI 모델 로딩 완료")
+        except Exception as e:
+            print(f"⚠️ AI 모델 로딩 실패 (인터넷 연결 확인): {e}")
+            
         self.keywords = ['Jerome Powell', 'Donald Trump', 'Fed Rate', 'Recession', 'Nasdaq']
 
     def send_telegram(self, message):
-        if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-            print("❌ 토큰 오류: GitHub Secrets 설정을 확인하세요. (콘솔 출력으로 대체)")
-            print(message)
+        if "여기에" in TELEGRAM_TOKEN or "여기에" in TELEGRAM_CHAT_ID:
+            print("\n[!!!!] 경고: 토큰과 ID를 입력하지 않으셨습니다!")
+            print(f"--- 전송 예정이었던 메시지 ---\n{message}\n-----------------------------")
             return
+
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
         data = {"chat_id": TELEGRAM_CHAT_ID, "text": message}
         try:
-            requests.post(url, data=data)
+            response = requests.post(url, data=data)
+            if response.status_code == 200:
+                print("✅ 텔레그램 메시지 전송 성공!")
+            else:
+                print(f"❌ 전송 실패 (에러코드 {response.status_code}): {response.text}")
         except Exception as e:
-            print(f"텔레그램 전송 실패: {e}")
+            print(f"텔레그램 접속 실패: {e}")
 
     def get_news_sentiment(self):
-        # GoogleNews 라이브러리가 종종 불안정하므로 예외처리 강화
+        print("📰 뉴스 데이터 분석 중...")
         try:
             googlenews = GoogleNews(lang='en', period='1d')
             total_score = 0
@@ -43,7 +54,6 @@ class DangerAlertBot:
             for keyword in self.keywords:
                 googlenews.clear()
                 googlenews.search(keyword)
-                # 검색 결과가 없거나 에러날 경우를 대비
                 results = googlenews.results(sort=True)
                 if not results: continue
 
@@ -55,120 +65,119 @@ class DangerAlertBot:
                         count += 1
                     except: continue
             return total_score / count if count > 0 else 0
-        except Exception as e:
-            print(f"뉴스 수집 중 에러: {e}")
+        except:
+            print("⚠️ 뉴스 수집 건너뜀 (일시적 오류)")
             return 0
 
     def get_market_data(self):
-        # ★ 핵심 개선: interval='1h' (1시간 봉) 사용
-        # 기간은 최근 1달(1mo)이면 지표 계산에 충분함
-        print("데이터 수집 중 (1시간 봉 기준)...")
-        
-        # 1. 나스닥 선물 (가격 분석용)
-        df = yf.download('NQ=F', period='1mo', interval='1h', progress=False)
-        
-        # 2. QQQ (거래량 분석용 - 선물의 거래량 데이터 오류 방지)
-        df_vol = yf.download('QQQ', period='1mo', interval='1h', progress=False)
-        
-        # 3. 금리
-        tnx = yf.download('^TNX', period='1mo', interval='1h', progress=False)
-
-        # MultiIndex 컬럼 처리
-        if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
-        if isinstance(df_vol.columns, pd.MultiIndex): df_vol.columns = df_vol.columns.get_level_values(0)
-        if isinstance(tnx.columns, pd.MultiIndex): tnx.columns = tnx.columns.get_level_values(0)
-
-        # 데이터 병합
-        # 시간축이 다를 수 있으므로 인덱스 기준으로 맞춤 (마지막 행이 중요)
-        df = df[['High', 'Low', 'Close']].copy()
-        
-        # 거래량은 QQQ 데이터를 사용 (신뢰도 향상)
-        # 인덱스(시간)를 맞춰서 가져오기 위해 reindex 사용
-        df['Volume'] = df_vol['Volume'].reindex(df.index).fillna(0)
-        df['US_10Y'] = tnx['Close'].reindex(df.index).fillna(method='ffill')
-        
-        return df.dropna()
-
-    def analyze_danger(self):
+        print("📈 시장 데이터 수집 중 (1시간 봉 기준)...")
         try:
-            df = self.get_market_data()
-            
+            # period='5d' (5일치), interval='1h' (1시간봉)
+            df = yf.download('NQ=F', period='5d', interval='1h', progress=False)
+            df_vol = yf.download('QQQ', period='5d', interval='1h', progress=False)
+            tnx = yf.download('^TNX', period='5d', interval='1h', progress=False)
+
+            # MultiIndex 컬럼 평탄화
+            if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
+            if isinstance(df_vol.columns, pd.MultiIndex): df_vol.columns = df_vol.columns.get_level_values(0)
+            if isinstance(tnx.columns, pd.MultiIndex): tnx.columns = tnx.columns.get_level_values(0)
+
             if df.empty:
-                print("❌ 데이터 수집 실패 (Empty DataFrame)")
-                return
+                print("❌ 오류: NQ=F 데이터가 없습니다.")
+                return pd.DataFrame()
 
-            # --- 지표 계산 (1시간 봉 기준) ---
+            # 필요한 컬럼만 추출
+            df = df[['High', 'Low', 'Close']].copy()
             
-            # 1. 거래량 이평선 (최근 20시간 평균)
-            df['Vol_MA20'] = df['Volume'].rolling(window=20).mean()
-            
-            # 최신 데이터 (마지막 캔들)
-            current_close = df['Close'].iloc[-1]
-            current_vol = df['Volume'].iloc[-1]
-            avg_vol = df['Vol_MA20'].iloc[-1]
-            
-            # 2. 일목균형표 (9, 26, 52 시간)
-            ichimoku = IchimokuIndicator(high=df['High'], low=df['Low'], window1=9, window2=26, window3=52)
-            span_a = ichimoku.ichimoku_a().iloc[-1]
-            
-            # 3. RSI (14시간)
-            rsi = RSIIndicator(close=df['Close'], window=14).rsi().iloc[-1]
-            
-            # 4. 뉴스
-            news_score = self.get_news_sentiment()
-            
-            # --- 위험 점수 계산 ---
-            danger_score = 0
-            reasons = []
-            
-            # [1] 구름대 이탈 (1시간 봉 기준 추세 이탈은 단기 위험 신호)
-            if current_close < span_a: 
-                danger_score += 30
-                reasons.append("☁️ 구름대 하단 이탈 (단기 추세 하락)")
-            
-            # [2] 거래량 폭증
-            # 0으로 나누기 방지
-            vol_ratio = 0
-            if avg_vol > 0:
-                vol_ratio = current_vol / avg_vol
-            
-            if vol_ratio > 1.5:
-                danger_score += 20
-                reasons.append(f"📢 거래량 급증 (직전평균 대비 {vol_ratio:.1f}배)")
-            
-            # [3] 뉴스 심리
-            if news_score < -0.2: 
-                danger_score += 25
-                reasons.append(f"📰 뉴스 심리 악화 ({news_score:.2f})")
-            
-            # [4] RSI 과매도
-            if rsi < 30: # 1시간 봉에서는 30 이하가 더 확실한 과매도
-                danger_score += 15
-                reasons.append(f"📉 RSI 과매도 ({rsi:.1f})")
-            
-            # [5] 복합 위험 (거래량 실린 하락)
-            if (current_close < span_a) and (vol_ratio > 1.5):
-                danger_score += 10
-                reasons.append("💥 [위험] 대량 거래 동반 하락")
+            # 시간대 통일 (UTC 제거)
+            df.index = pd.to_datetime(df.index).tz_localize(None)
+            df_vol.index = pd.to_datetime(df_vol.index).tz_localize(None)
+            tnx.index = pd.to_datetime(tnx.index).tz_localize(None)
 
-            # --- 결과 전송 ---
-            status = '🔴 위험 (현금화)' if danger_score >= 70 else '🟡 주의 (관망)' if danger_score >= 40 else '🟢 안정 (매수)'
+            # 데이터 병합 (중요: 결측치 방어 로직 추가)
+            # 1. 거래량: 없으면 0으로 채움
+            df['Volume'] = df_vol['Volume'].reindex(df.index).fillna(0)
             
-            msg = f"🔔 [시장 알림 - 1시간봉 기준]\n상태: {status} (점수: {danger_score})\n"
-            if reasons: 
-                msg += "\n".join(["- " + r for r in reasons])
-            else: 
-                msg += "- 특이사항 없음"
+            # 2. 금리: 앞뒤 값으로 채움 (ffill + bfill)
+            # 금리 데이터가 아예 없으면 4.0(기본값)으로 채워 에러 방지
+            tnx_series = tnx['Close'].reindex(df.index)
+            df['US_10Y'] = tnx_series.ffill().bfill().fillna(4.0)
             
-            msg += f"\n\n📊 거래량(QQQ): 평소 대비 {int(vol_ratio*100)}%"
-            msg += f"\n📈 현재가(NQ): {current_close:.2f}"
+            # 3. 그래도 비어있는 '가격(Close)' 데이터만 삭제 (금리 때문에 삭제되는 일 방지)
+            final_df = df.dropna(subset=['Close'])
             
-            self.send_telegram(msg)
-            print("✅ 분석 완료")
+            print(f"✅ 데이터 준비 완료 ({len(final_df)}개 캔들)")
+            return final_df
 
         except Exception as e:
-            print(f"Main logic Error: {e}")
-            self.send_telegram(f"❌ 봇 에러: {str(e)}")
+            print(f"❌ 데이터 다운로드 중 치명적 오류: {e}")
+            import traceback
+            traceback.print_exc()
+            return pd.DataFrame()
+
+    def analyze_danger(self):
+        df = self.get_market_data()
+        if df.empty: 
+            print("❌ 분석할 데이터가 없어 종료합니다.")
+            return
+
+        print("🧮 위험도 계산 중...")
+        # 지표 계산
+        df['Vol_MA20'] = df['Volume'].rolling(window=20).mean()
+        
+        current_close = df['Close'].iloc[-1]
+        current_vol = df['Volume'].iloc[-1]
+        avg_vol = df['Vol_MA20'].iloc[-1]
+        
+        ichimoku = IchimokuIndicator(high=df['High'], low=df['Low'], window1=9, window2=26, window3=52)
+        span_a = ichimoku.ichimoku_a().iloc[-1]
+        rsi = RSIIndicator(close=df['Close'], window=14).rsi().iloc[-1]
+        
+        news_score = self.get_news_sentiment()
+        
+        # 위험 점수 계산
+        danger_score = 0
+        reasons = []
+        
+        # [1] 구름대 하단 이탈
+        if current_close < span_a: 
+            danger_score += 30
+            reasons.append("☁️ 구름대 하단 이탈 (하락추세)")
+        
+        # [2] 거래량 폭증
+        vol_ratio = 0
+        if avg_vol > 0: vol_ratio = current_vol / avg_vol
+        
+        if vol_ratio > 1.5:
+            danger_score += 20
+            reasons.append(f"📢 거래량 급증 ({vol_ratio:.1f}배)")
+        
+        # [3] 뉴스 악재
+        if news_score < -0.2: 
+            danger_score += 25
+            reasons.append(f"📰 뉴스 악재 발생 ({news_score:.2f})")
+        
+        # [4] RSI 과매도
+        if rsi < 30: 
+            danger_score += 15
+            reasons.append(f"📉 RSI 과매도 ({rsi:.1f})")
+            
+        # [5] 복합 위험 (거래량 실린 하락)
+        if (current_close < span_a) and (vol_ratio > 1.5):
+            danger_score += 10
+            reasons.append("💥 [위험] 대량 거래 동반 하락")
+
+        # 메시지 작성
+        status = '🔴 위험 (매도 고려)' if danger_score >= 70 else '🟡 주의 (관망)' if danger_score >= 40 else '🟢 안정 (매수 유효)'
+        
+        msg = f"🔔 [AI 시장 감시 - 실시간]\n상태: {status} (점수: {danger_score})\n"
+        if reasons: msg += "\n".join(["- " + r for r in reasons])
+        else: msg += "- 특이사항 없음"
+        
+        msg += f"\n\n📊 거래량(QQQ): 평소 대비 {int(vol_ratio*100)}%"
+        msg += f"\n📈 현재가(NQ): {current_close:.2f}"
+        
+        self.send_telegram(msg)
 
 if __name__ == "__main__":
     bot = DangerAlertBot()
