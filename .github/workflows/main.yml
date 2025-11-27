@@ -1,0 +1,31 @@
+name: Nasdaq Alert Bot
+
+on:
+  schedule:
+    # UTC 기준 시간 설정 (한국 시간 - 9시간)
+    # 08:50 UTC = 17:50 KST (프리장 전)
+    # 14:20 UTC = 23:20 KST (정규장 전)
+    # 20:50 UTC = 05:50 KST (장마감 전/다음날)
+    - cron: '50 8,14,20 * * 1-5' # 월~금 실행
+  workflow_dispatch: # 수동 실행 버튼 추가
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+          
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          
+      - name: Run Alert Bot
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python main.py
