@@ -17,7 +17,7 @@ TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
 
 class DangerAlertBot:
     def __init__(self):
-        print("🤖 AI 시스템(Dashboard Ver) 가동 중...")
+        print("🤖 AI 시스템(Crypto-Stock Ver) 가동 중...")
         try:
             self.tokenizer = BertTokenizer.from_pretrained('ProsusAI/finbert')
             self.model = BertForSequenceClassification.from_pretrained('ProsusAI/finbert')
@@ -54,8 +54,8 @@ class DangerAlertBot:
 
     def get_market_data(self):
         try:
-            # 주요 지표 6종 수집
-            tickers = ['NQ=F', 'QQQ', '^VIX', 'DX-Y.NYB', 'SOXX', 'HYG', '^TNX']
+            # [추가] 비트코인(BTC-USD) 포함
+            tickers = ['NQ=F', 'QQQ', '^VIX', 'DX-Y.NYB', 'SOXX', 'HYG', '^TNX', 'BTC-USD']
             data = yf.download(tickers, period='5d', interval='1h', progress=False)
 
             if isinstance(data.columns, pd.MultiIndex): 
@@ -69,6 +69,7 @@ class DangerAlertBot:
                 df['SOXX'] = data['Close']['SOXX']
                 df['HYG'] = data['Close']['HYG']
                 df['TNX'] = data['Close']['^TNX']
+                df['BTC'] = data['Close']['BTC-USD'] # 비트코인 추가
             else: return pd.DataFrame()
 
             if df.empty: return pd.DataFrame()
@@ -97,16 +98,20 @@ class DangerAlertBot:
         vix_trend = current_vix - df['VIX'].rolling(window=5).mean().iloc[-1]
         
         current_dxy = df['DXY'].iloc[-1]
-        dxy_chg = (current_dxy - df['DXY'].iloc[-24]) / df['DXY'].iloc[-24] * 100 # 24시간 전 대비 변화율
+        dxy_chg = (current_dxy - df['DXY'].iloc[-24]) / df['DXY'].iloc[-24] * 100 
         
         current_tnx = df['TNX'].iloc[-1]
         
-        # 반도체 상대 강도
+        # C. [신규] 비트코인 변동성 분석
+        current_btc = df['BTC'].iloc[-1]
+        # 24시간 전 대비 등락률 계산 (비트코인은 24시간 거래되므로 중요)
+        btc_chg = (current_btc - df['BTC'].iloc[-24]) / df['BTC'].iloc[-24] * 100
+        
+        # 섹터 약세 체크
         nq_ret = df['Close'].iloc[-1] / df['Close'].iloc[-5] - 1
         soxx_ret = df['SOXX'].iloc[-1] / df['SOXX'].iloc[-5] - 1
         semi_weakness = nq_ret - soxx_ret 
 
-        # 하이일드 채권 (자금 이탈)
         hyg_ma20 = df['HYG'].rolling(window=20).mean().iloc[-1]
         current_hyg = df['HYG'].iloc[-1]
 
@@ -122,7 +127,7 @@ class DangerAlertBot:
             danger_score += 25
             reasons.append("☁️ 구름대 이탈")
             cloud_status = "구름대 하단 이탈 ☁️"
-        elif current_close < span_b: # 구름대 안
+        elif current_close < span_b: 
             cloud_status = "구름대 진입 (혼조)"
 
         # [B] 거래량
@@ -140,51 +145,56 @@ class DangerAlertBot:
             danger_score += 15
             reasons.append(f"💵 달러 급등 (+{dxy_chg:.2f}%)")
             dxy_status += " 🔺"
+            
+        # [D] 비트코인 급락 감지 (신규)
+        btc_status = f"${current_btc:,.0f} ({btc_chg:+.2f}%)"
+        if btc_chg < -3.0: # 24시간 내 -3% 이상 하락 시
+            danger_score += 15
+            reasons.append(f"📉 비트코인 급락 ({btc_chg:.2f}%)")
+            btc_status += " ⚠️"
+        elif btc_chg > 3.0:
+            btc_status += " (강세 🔥)"
 
-        # [D] 반도체
+        # [E] 반도체
         semi_status = "양호"
         if semi_weakness > 0.005:
-            danger_score += 15
+            danger_score += 10
             reasons.append("📉 반도체 상대적 약세")
-            semi_status = "나스닥 대비 약세 ⚠️"
+            semi_status = "약세 ⚠️"
 
-        # [E] 스마트머니
+        # [F] 스마트머니
         hyg_status = "유입 중"
         if current_hyg < hyg_ma20:
-            danger_score += 15
-            reasons.append("💸 스마트머니(HYG) 이탈")
-            hyg_status = "자금 이탈 감지 ⚠️"
+            danger_score += 10
+            reasons.append("💸 스마트머니 이탈")
+            hyg_status = "이탈 ⚠️"
 
-        # [F] 공포지수
+        # [G] 공포지수
         vix_status = f"{current_vix:.2f}"
         if vix_trend > 0.5:
-            danger_score += 15
+            danger_score += 10
             reasons.append("😱 공포지수 확산")
-            vix_status += " (확산 중 ↗)"
+            vix_status += " (확산 ↗)"
         else:
             vix_status += " (안정 ↘)"
 
-        # [G] 뉴스
+        # [H] 뉴스
         news_status = f"{news_score:.2f}"
         if news_score < -0.2:
             danger_score += 10
             reasons.append("📰 뉴스 심리 악화")
-            news_status += " (악재 우세) ⚠️"
-        elif news_score > 0.2:
-            news_status += " (호재 우세) 😊"
+            news_status += " (악재) ⚠️"
         else:
-            news_status += " (중립) 😐"
+            news_status += " (중립/호재)"
 
-        # RSI 상태 텍스트
+        # RSI 상태
         rsi_status = f"{rsi_val:.1f}"
         if rsi_val < 30: rsi_status += " (과매도) 📉"
         elif rsi_val > 70: rsi_status += " (과매수) 📈"
-        else: rsi_status += " (중립)"
 
-        # 점수 보정
         danger_score = min(danger_score, 100)
 
-        # --- 3. 메시지 작성 (Dashboard Style) ---
+        # --- 3. 메시지 작성 ---
         status_emoji = '🔴 위험 (매도)' if danger_score >= 60 else '🟡 주의 (관망)' if danger_score >= 35 else '🟢 안정 (매수)'
         
         now_kst = datetime.now() + timedelta(hours=9)
@@ -195,28 +205,28 @@ class DangerAlertBot:
         msg += f"🔥 위험 점수: {danger_score}점 / 100점\n\n"
         
         msg += "───────────────\n"
-        msg += "1️⃣ 매크로 & 수급 (Market Health)\n"
+        msg += "1️⃣ 리스크 에셋 (Risk On/Off)\n"
+        msg += f"₿ 비트코인 : {btc_status}\n"
+        msg += f"📉 반도체(SOXX) : {semi_status}\n"
+        msg += f"💸 하이일드(HYG): {hyg_status}\n\n"
+        
+        msg += "2️⃣ 매크로 (Macro)\n"
         msg += f"💵 달러 인덱스 : {dxy_status}\n"
         msg += f"🏦 국채금리(10Y): {current_tnx:.2f}%\n"
-        msg += f"💸 하이일드(HYG): {hyg_status}\n"
-        msg += f"📉 반도체(SOXX) : {semi_status}\n\n"
+        msg += f"😱 공포지수(VIX): {vix_status}\n\n"
         
-        msg += "2️⃣ 기술적 분석 (Technical)\n"
+        msg += "3️⃣ 기술적 분석 (Technical)\n"
         msg += f"📈 나스닥 선물 : {current_close:,.2f}\n"
         msg += f"📊 거래량 강도 : {vol_status}\n"
         msg += f"☁️ 일목균형표 : {cloud_status}\n"
-        msg += f"📉 RSI (14)   : {rsi_status}\n\n"
-        
-        msg += "3️⃣ 심리 지표 (Sentiment)\n"
-        msg += f"😱 공포지수(VIX): {vix_status}\n"
-        msg += f"📰 뉴스 투심   : {news_status}\n"
+        msg += f"📉 RSI (14)   : {rsi_status}\n"
         msg += "───────────────\n\n"
         
         msg += "📋 [상세 위험 요인 분석]\n"
         if reasons:
             msg += "\n".join(["- " + r for r in reasons])
         else:
-            msg += "- 특이사항 없음 (모든 지표 안정적)"
+            msg += "- 특이사항 없음 (안정적)"
 
         self.send_telegram(msg)
 
