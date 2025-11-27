@@ -57,33 +57,79 @@ class DangerAlertBot:
 
     def analyze_danger(self):
         try:
+            # 1. 데이터 가져오기 (거래량 Volume 포함)
             df = self.get_market_data()
-            current_close = df['Close'].iloc[-1]
             
-            # 지표 계산
+            # 2. 거래량 이동평균선(20일) 계산
+            # "평소보다 거래량이 얼마나 많은가?"를 알기 위해 필요
+            df['Vol_MA20'] = df['Volume'].rolling(window=20).mean()
+            
+            # 최신 데이터 추출
+            current_close = df['Close'].iloc[-1]
+            current_vol = df['Volume'].iloc[-1]
+            avg_vol = df['Vol_MA20'].iloc[-1]
+            
+            # 기술적 지표 계산
             ichimoku = IchimokuIndicator(high=df['High'], low=df['Low'], window1=9, window2=26, window3=52)
             span_a = ichimoku.ichimoku_a().iloc[-1]
             rsi = RSIIndicator(close=df['Close'], window=14).rsi().iloc[-1]
             
+            # 뉴스 점수
             news_score = self.get_news_sentiment()
             
+            # ----------------------------------------------------
+            # 🚨 위험 점수 계산 로직 (거래량 추가됨)
+            # ----------------------------------------------------
             danger_score = 0
             reasons = []
             
-            if current_close < span_a: danger_score += 40; reasons.append("☁️ 구름대 하단 이탈")
-            if news_score < -0.2: danger_score += 30; reasons.append(f"📰 뉴스 심리 악화({news_score:.2f})")
-            if rsi < 35: danger_score += 15; reasons.append(f"📉 RSI 과매도({rsi:.1f})")
+            # [1] 구름대 하단 이탈 (추세 하락) -> 가장 큰 위험
+            if current_close < span_a: 
+                danger_score += 30
+                reasons.append("☁️ 일목균형표 구름대 하단 이탈")
+                
+            # [2] 거래량 폭증 (평소의 1.5배 이상) -> 패닉 셀링 의심
+            # 거래량이 터졌는데 주가가 빠지고 있다면 매우 위험
+            vol_ratio = current_vol / avg_vol
+            if vol_ratio > 1.5:
+                danger_score += 20
+                reasons.append(f"📢 거래량 폭증 (평소의 {vol_ratio:.1f}배)")
             
-            status = '🔴 위험' if danger_score >= 70 else '🟡 주의' if danger_score >= 40 else '🟢 안정'
+            # [3] 뉴스 심리 악화
+            if news_score < -0.2: 
+                danger_score += 25
+                reasons.append(f"📰 뉴스 심리 악화 (점수: {news_score:.2f})")
+                
+            # [4] RSI 과매도 진입 (단기 급락)
+            if rsi < 35: 
+                danger_score += 15
+                reasons.append(f"📉 RSI 과매도 구간 ({rsi:.1f})")
+                
+            # [5] 추가 가중치: 거래량이 터지면서 + 구름대도 이탈했다면?
+            if (current_close < span_a) and (vol_ratio > 1.5):
+                danger_score += 10
+                reasons.append("💥 [치명적] 대량 거래 동반 하락")
             
-            msg = f"🔔 [시장 알림]\n상태: {status} (점수: {danger_score})\n"
-            if reasons: msg += "\n".join(["- " + r for r in reasons])
-            else: msg += "- 특이사항 없음"
+            # ----------------------------------------------------
+            # 상태 진단 및 전송
+            # ----------------------------------------------------
+            status = '🔴 위험 (현금화)' if danger_score >= 70 else '🟡 주의 (관망)' if danger_score >= 40 else '🟢 안정 (매수)'
+            
+            msg = f"🔔 [시장 위험 감지 리포트]\n상태: {status} (위험도: {danger_score}점)\n"
+            
+            if reasons: 
+                msg += "\n".join(["- " + r for r in reasons])
+            else: 
+                msg += "- 특이사항 없음 (안정적 흐름)"
+            
+            # 거래량 정보도 메시지에 추가해서 보여줌
+            msg += f"\n\n📊 거래량 분석: 평소 대비 {int(vol_ratio*100)}% 수준"
             
             self.send_telegram(msg)
             print("✅ 분석 완료 및 전송 성공")
             
         except Exception as e:
+            print(f"에러 발생: {e}")
             self.send_telegram(f"❌ 봇 에러 발생: {str(e)}")
 
 if __name__ == "__main__":
