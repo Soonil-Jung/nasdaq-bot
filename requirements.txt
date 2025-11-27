@@ -1,0 +1,10 @@
+yfinance
+pandas
+numpy
+xgboost
+ta
+transformers
+torch
+GoogleNews
+newspaper3k
+requests
