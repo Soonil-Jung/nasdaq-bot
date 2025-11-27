@@ -102,18 +102,20 @@ class DangerAlertBot:
         
         current_tnx = df['TNX'].iloc[-1]
         
-        # C. [신규] 비트코인 변동성 분석
+        # 비트코인 변동성
         current_btc = df['BTC'].iloc[-1]
-        # 24시간 전 대비 등락률 계산 (비트코인은 24시간 거래되므로 중요)
         btc_chg = (current_btc - df['BTC'].iloc[-24]) / df['BTC'].iloc[-24] * 100
         
-        # 섹터 약세 체크
+        # 반도체 약세 체크
         nq_ret = df['Close'].iloc[-1] / df['Close'].iloc[-5] - 1
         soxx_ret = df['SOXX'].iloc[-1] / df['SOXX'].iloc[-5] - 1
         semi_weakness = nq_ret - soxx_ret 
 
-        hyg_ma20 = df['HYG'].rolling(window=20).mean().iloc[-1]
+        # ★ [수정됨] 하이일드 채권 (고점 대비 하락률로 변경)
+        # 단순히 이평선 이탈이 아니라, 최근 5일 고점 대비 -0.3% 이상 빠져야 위험으로 간주
+        hyg_high = df['HYG'].max()
         current_hyg = df['HYG'].iloc[-1]
+        hyg_drawdown = (current_hyg - hyg_high) / hyg_high * 100
 
         news_score = self.get_news_sentiment()
 
@@ -146,14 +148,12 @@ class DangerAlertBot:
             reasons.append(f"💵 달러 급등 (+{dxy_chg:.2f}%)")
             dxy_status += " 🔺"
             
-        # [D] 비트코인 급락 감지 (신규)
+        # [D] 비트코인
         btc_status = f"${current_btc:,.0f} ({btc_chg:+.2f}%)"
-        if btc_chg < -3.0: # 24시간 내 -3% 이상 하락 시
+        if btc_chg < -3.0: 
             danger_score += 15
             reasons.append(f"📉 비트코인 급락 ({btc_chg:.2f}%)")
             btc_status += " ⚠️"
-        elif btc_chg > 3.0:
-            btc_status += " (강세 🔥)"
 
         # [E] 반도체
         semi_status = "양호"
@@ -162,12 +162,12 @@ class DangerAlertBot:
             reasons.append("📉 반도체 상대적 약세")
             semi_status = "약세 ⚠️"
 
-        # [F] 스마트머니
-        hyg_status = "유입 중"
-        if current_hyg < hyg_ma20:
-            danger_score += 10
-            reasons.append("💸 스마트머니 이탈")
-            hyg_status = "이탈 ⚠️"
+        # [F] ★ 하이일드 (로직 변경됨)
+        hyg_status = "안정적 (유입)"
+        if hyg_drawdown < -0.3: # -0.3% 이상 하락 시에만 경고
+            danger_score += 15
+            reasons.append(f"💸 스마트머니 이탈 ({hyg_drawdown:.2f}%)")
+            hyg_status = "자금 이탈 감지 ⚠️"
 
         # [G] 공포지수
         vix_status = f"{current_vix:.2f}"
