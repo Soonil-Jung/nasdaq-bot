@@ -27,17 +27,18 @@ TARGET_STOCKS = {
 
 class DangerAlertBot:
     def __init__(self):
-        print("🤖 AI 시스템(Live-Price Ver) 가동 중...")
+        print("🤖 AI 시스템(News-Link-Complete Ver) 가동 중...")
         try:
             self.tokenizer = BertTokenizer.from_pretrained('ProsusAI/finbert')
             self.model = BertForSequenceClassification.from_pretrained('ProsusAI/finbert')
             self.nlp = pipeline("sentiment-analysis", model=self.model, tokenizer=self.tokenizer)
         except: pass
-        self.macro_keywords = ['Jerome Powell', 'Fed Rate', 'Recession', 'US Economy', 'Nasdaq']
+        self.macro_keywords = ['Jerome Powell', 'Donald Trump', 'Fed Rate', 'Recession', 'Nasdaq']
 
     def send_telegram(self, message):
         if not TELEGRAM_TOKEN: return
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        # parse_mode='Markdown' 필수 (링크 기능을 위해)
         data = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown", "disable_web_page_preview": True}
         try: requests.post(url, data=data)
         except: pass
@@ -120,7 +121,7 @@ class DangerAlertBot:
     def analyze_individual(self, ticker, df_stock, df_macro):
         if df_stock.empty: return None
 
-        # [1] 실시간 가격 및 등락률 조회 (가장 정확한 방법)
+        # [1] 실시간 가격 조회
         try:
             stock_info = yf.Ticker(ticker).fast_info
             current_price = stock_info.get('last_price')
@@ -129,14 +130,13 @@ class DangerAlertBot:
             if current_price and prev_close:
                 daily_pct = (current_price - prev_close) / prev_close * 100
             else:
-                # 실패 시 차트 데이터로 대체
                 current_price = df_stock['Close'].iloc[-1]
                 daily_pct = (current_price - df_stock['Close'].iloc[-8]) / df_stock['Close'].iloc[-8] * 100 
         except:
             current_price = df_stock['Close'].iloc[-1]
             daily_pct = (current_price - df_stock['Close'].iloc[-8]) / df_stock['Close'].iloc[-8] * 100
 
-        # [2] 기술적 지표 (차트 데이터 사용)
+        # [2] 기술적 지표
         ichimoku = IchimokuIndicator(high=df_stock['High'], low=df_stock['Low'], window1=9, window2=26, window3=52)
         span_a = ichimoku.ichimoku_a().iloc[-1]
         rsi_val = RSIIndicator(close=df_stock['Close'], window=14).rsi().iloc[-1]
@@ -146,18 +146,18 @@ class DangerAlertBot:
         if df_stock['Vol_MA20'].iloc[-1] > 0:
             vol_ratio = df_stock['Volume'].iloc[-1] / df_stock['Vol_MA20'].iloc[-1]
 
-        # 상대 강도 (vs NQ)
         qqq_chg = 0
         try:
             qqq_now = df_macro['Close'].iloc[-1]
-            qqq_prev = df_macro['Close'].iloc[-24] # 24시간 전 비교
+            qqq_prev = df_macro['Close'].iloc[-24] 
             qqq_chg = (qqq_now - qqq_prev) / qqq_prev * 100
         except: pass
         relative_strength = daily_pct - qqq_chg
 
-        # [3] 뉴스 분석
+        # [3] 뉴스 분석 (링크 포함하여 가져오기)
         search_keyword = TARGET_STOCKS.get(ticker, ticker)
-        news_score, worst_news, _ = self.get_news_sentiment(search_keyword)
+        # ★ [수정] worst_link도 함께 받아옵니다.
+        news_score, worst_news, worst_link = self.get_news_sentiment(search_keyword)
 
         # [4] 위험 점수 산출
         danger_score = 0
@@ -186,10 +186,16 @@ class DangerAlertBot:
             danger_score += 15
             reasons.append(f"거래량폭발")
 
+        # ★ 개별 뉴스 악재 반영 (링크 포함)
         if news_score < -0.3:
             danger_score += 20
-            short_news = worst_news[:15] + "..." if len(worst_news) > 15 else worst_news
-            reasons.append(f"📰 악재 뉴스")
+            if worst_news and worst_link:
+                # 텔레그램 마크다운 링크 포맷: [텍스트](URL)
+                # 뉴스 제목이 너무 길면 자름
+                clean_title = worst_news[:30] + "..." if len(worst_news) > 30 else worst_news
+                reasons.append(f"📰 악재: [{clean_title}]({worst_link})")
+            else:
+                reasons.append(f"📰 악재 뉴스 감지")
 
         return {
             "ticker": ticker,
@@ -293,11 +299,10 @@ class DangerAlertBot:
         msg += f"• 공포지수 : {current_vix:.2f} (추세: {'확산↗' if vix_trend>0 else '진정↘'})\n"
         msg += f"• 뉴스점수 : {news_score:.2f} ({'악재' if news_score<-0.2 else '중립/호재'})\n"
         if worst_title and news_score < -0.2:
-            msg += f"  └ 🗞 _{worst_title}_\n"
-            if worst_link: msg += f"  └ 🔗 [원문]({worst_link})\n"
+            msg += f"  └ 🗞 [{worst_title[:30]}...]({worst_link})\n"
             
         msg += "\n───────────────\n"
-        msg += "*📊 종목별 위험도 (현재가/등락률)*\n"
+        msg += "*📊 종목별 위험도 랭킹 (개별뉴스 반영)*\n"
         
         for item in stock_results:
             icon = "🔴" if item['score'] >= 60 else "🟡" if item['score'] >= 30 else "🟢"
@@ -306,6 +311,7 @@ class DangerAlertBot:
             
             msg += f"{icon} *{item['ticker']}*: {price_info} | {item['score']}점\n"
             if item['score'] >= 30:
+                # 사유 요약 (링크 포함)
                 reason_str = ", ".join(item['reasons']) if item['reasons'] else ""
                 msg += f"  └ {reason_str}\n"
         
