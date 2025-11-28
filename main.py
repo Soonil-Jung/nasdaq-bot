@@ -27,7 +27,7 @@ TARGET_STOCKS = {
 
 class DangerAlertBot:
     def __init__(self):
-        print("🤖 AI 시스템(Final-Formatted Ver) 가동 중...")
+        print("🤖 AI 시스템(Realtime-Fix Ver) 가동 중...")
         try:
             self.tokenizer = BertTokenizer.from_pretrained('ProsusAI/finbert')
             self.model = BertForSequenceClassification.from_pretrained('ProsusAI/finbert')
@@ -45,6 +45,28 @@ class DangerAlertBot:
         data = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown", "disable_web_page_preview": True}
         try: requests.post(url, data=data)
         except: pass
+
+    # ★ [신규 함수] 가장 최신 가격을 1분봉으로 강제 조회
+    def get_realtime_price(self, ticker):
+        try:
+            # 1. 1분봉 데이터 요청 (최근 1일치)
+            # period='1d', interval='1m'을 쓰면 가장 최신 체결가를 가져올 확률이 높음
+            df = yf.download(ticker, period='1d', interval='1m', progress=False)
+            
+            if not df.empty:
+                if isinstance(df.columns, pd.MultiIndex):
+                    price = df['Close'].iloc[-1].item()
+                else:
+                    price = df['Close'].iloc[-1]
+                return price
+            
+            # 2. 실패 시 fast_info 시도
+            info = yf.Ticker(ticker).fast_info
+            if info.get('last_price'):
+                return info.get('last_price')
+                
+        except: pass
+        return None
 
     def get_news_sentiment(self, target_keywords):
         try:
@@ -88,6 +110,7 @@ class DangerAlertBot:
             macro_tickers = ['NQ=F', 'QQQ', '^VIX', 'DX-Y.NYB', 'SOXX', 'HYG', '^TNX', 'BTC-USD', '^IRX']
             all_tickers = macro_tickers + list(TARGET_STOCKS.keys())
             
+            # 차트 분석용은 그대로 1시간봉 사용 (지표 계산용)
             data = yf.download(all_tickers, period='5d', interval='1h', progress=False)
 
             if isinstance(data.columns, pd.MultiIndex): 
@@ -127,20 +150,24 @@ class DangerAlertBot:
     def analyze_individual(self, ticker, df_stock, df_macro):
         if df_stock.empty: return None
 
-        # [1] 실시간 가격
+        # [1] 실시간 가격 조회 (1분봉 강제 조회 적용)
+        live_price = self.get_realtime_price(ticker)
+        if live_price:
+            current_price = live_price
+        else:
+            current_price = df_stock['Close'].iloc[-1] # 실패시 차트값 사용
+
+        # 등락률 계산 (전일 종가 대비)
+        # yfinance history 메타데이터에서 전일 종가 가져오기 시도
         try:
-            stock_info = yf.Ticker(ticker).fast_info
-            current_price = stock_info.get('last_price')
-            prev_close = stock_info.get('previous_close')
-            
-            if current_price and prev_close:
-                daily_pct = (current_price - prev_close) / prev_close * 100
-            else:
-                current_price = df_stock['Close'].iloc[-1]
-                daily_pct = (current_price - df_stock['Close'].iloc[-8]) / df_stock['Close'].iloc[-8] * 100 
+            prev_close = yf.Ticker(ticker).info.get('previousClose')
+            if not prev_close:
+                # 메타데이터 없으면 차트에서 대략 8시간 전 가격 사용
+                prev_close = df_stock['Close'].iloc[-8]
         except:
-            current_price = df_stock['Close'].iloc[-1]
-            daily_pct = (current_price - df_stock['Close'].iloc[-8]) / df_stock['Close'].iloc[-8] * 100
+            prev_close = df_stock['Close'].iloc[-8]
+
+        daily_pct = (current_price - prev_close) / prev_close * 100
 
         # [2] 기술적 지표
         ichimoku = IchimokuIndicator(high=df_stock['High'], low=df_stock['Low'], window1=9, window2=26, window3=52)
@@ -154,13 +181,17 @@ class DangerAlertBot:
 
         qqq_chg = 0
         try:
-            qqq_now = df_macro['Close'].iloc[-1]
+            # 매크로 기준도 실시간 반영
+            nq_live = self.get_realtime_price('NQ=F')
+            if not nq_live: nq_live = df_macro['Close'].iloc[-1]
+            
+            qqq_now = nq_live
             qqq_prev = df_macro['Close'].iloc[-24] 
             qqq_chg = (qqq_now - qqq_prev) / qqq_prev * 100
         except: pass
         relative_strength = daily_pct - qqq_chg
 
-        # [3] 뉴스 분석 (언론사 포함)
+        # [3] 뉴스 분석
         search_keyword = TARGET_STOCKS.get(ticker, ticker)
         news_score, worst_news, worst_link, worst_source = self.get_news_sentiment(search_keyword)
 
@@ -207,21 +238,21 @@ class DangerAlertBot:
     def analyze_danger(self):
         dfs = self.get_market_data()
         if not dfs or 'MACRO' not in dfs: return
-        
         df = dfs['MACRO']
 
-        # --- [PART 1] 매크로 분석 (v10 방식의 정밀 지표 계산) ---
+        # --- [PART 1] 매크로 분석 ---
         df['Vol_MA20'] = df['Volume'].rolling(window=20).mean()
         ichimoku = IchimokuIndicator(high=df['High'], low=df['Low'], window1=9, window2=26, window3=52)
         span_a = ichimoku.ichimoku_a().iloc[-1]
         span_b = ichimoku.ichimoku_b().iloc[-1]
         rsi_val = RSIIndicator(close=df['Close'], window=14).rsi().iloc[-1]
         
-        try:
-            ticker_nq = yf.Ticker("NQ=F")
-            price = ticker_nq.fast_info.get('last_price')
-            current_close = price if (price and not np.isnan(price)) else df['Close'].iloc[-1]
-        except: current_close = df['Close'].iloc[-1]
+        # ★ [수정] 1분봉 강제 조회로 현재가 갱신
+        live_price = self.get_realtime_price('NQ=F')
+        if live_price:
+            current_close = live_price
+        else:
+            current_close = df['Close'].iloc[-1]
 
         daily_chg = (current_close - df['Close'].iloc[-24]) / df['Close'].iloc[-24] * 100 
         hourly_chg = (current_close - df['Close'].iloc[-2]) / df['Close'].iloc[-2] * 100
@@ -248,7 +279,6 @@ class DangerAlertBot:
         current_hyg = df['HYG'].iloc[-1]
         hyg_drawdown = (current_hyg - hyg_high) / hyg_high * 100
 
-        # 매크로 뉴스 (출처 포함)
         news_score, worst_title, worst_link, worst_source = self.get_news_sentiment(self.macro_keywords)
         current_vix = df['VIX'].iloc[-1]
         vix_trend = current_vix - df['VIX'].rolling(window=5).mean().iloc[-1]
@@ -275,7 +305,7 @@ class DangerAlertBot:
                 if res: stock_results.append(res)
         stock_results.sort(key=lambda x: x['score'], reverse=True)
 
-        # --- [PART 3] 메시지 작성 (v10 스타일로 복원) ---
+        # --- [PART 3] 메시지 작성 (v10 스타일) ---
         status_emoji = '🔴 위험' if danger_score >= 60 else '🟡 주의' if danger_score >= 35 else '🟢 안정'
         cloud_str = "하단 이탈 🚨" if current_close < span_a else "구름대 위 ✅"
         spread_str = "정상 ✅" if yield_spread >= 0 else "역전(침체) ⚠️"
@@ -289,7 +319,6 @@ class DangerAlertBot:
         msg += f"📅 {now_kst.strftime('%Y-%m-%d %H:%M')} (KST)\n"
         msg += f"🚦 종합상태: {status_emoji} ({danger_score}점)\n\n"
         
-        # [v10 스타일 복원]
         msg += "*1️⃣ 가격 & 거래량 (Technical)*\n"
         msg += f"• 나스닥 : {current_close:,.2f} (24h: {daily_chg:+.2f}%)\n"
         msg += f"• 1시간봉 : {hourly_chg:+.2f}% (단기변동)\n"
@@ -322,7 +351,7 @@ class DangerAlertBot:
             msg += "✅ 특이사항 없음 (안정적)"
 
         msg += "\n\n───────────────\n"
-        msg += "*📊 종목별 위험도 랭킹 (개별뉴스 반영)*\n"
+        msg += "*📊 종목별 위험도 (현재가/등락률)*\n"
         
         for item in stock_results:
             icon = "🔴" if item['score'] >= 60 else "🟡" if item['score'] >= 30 else "🟢"
