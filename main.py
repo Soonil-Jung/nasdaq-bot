@@ -17,7 +17,7 @@ TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
 
 class DangerAlertBot:
     def __init__(self):
-        print("🤖 AI 시스템(Deep-News Ver) 가동 중...")
+        print("🤖 AI 시스템(Link-Support Ver) 가동 중...")
         try:
             self.tokenizer = BertTokenizer.from_pretrained('ProsusAI/finbert')
             self.model = BertForSequenceClassification.from_pretrained('ProsusAI/finbert')
@@ -28,20 +28,21 @@ class DangerAlertBot:
     def send_telegram(self, message):
         if not TELEGRAM_TOKEN: return
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        data = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown"}
+        # disable_web_page_preview=True: 메시지 내 링크 미리보기 이미지가 너무 크게 뜨는 것 방지
+        data = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown", "disable_web_page_preview": True}
         try: requests.post(url, data=data)
         except: pass
 
     def get_news_sentiment(self):
-        # 점수뿐만 아니라 '가장 부정적인 뉴스 제목'도 반환하도록 수정
+        # [수정] 점수, 제목, 그리고 '링크'까지 반환
         try:
             googlenews = GoogleNews(lang='en', period='1d')
             total_score = 0
             count = 0
             
-            # 가장 부정적인 뉴스를 찾기 위한 변수
             worst_news_title = ""
-            min_score = 1.0 # 최악의 점수 기록용 (낮을수록 나쁨)
+            worst_news_link = ""
+            min_score = 1.0 
 
             for keyword in self.keywords:
                 googlenews.clear()
@@ -52,27 +53,31 @@ class DangerAlertBot:
                 for item in results[:2]:
                     try:
                         title = item['title']
+                        link = item['link'] # 기사 링크 가져오기
+                        
                         res = self.nlp(title[:512])[0]
                         score = res['score'] if res['label'] == 'positive' else -res['score'] if res['label'] == 'negative' else 0
                         
                         total_score += score
                         count += 1
                         
-                        # 가장 부정적인(점수가 낮은) 뉴스 기억하기
-                        if score < min_score and score < -0.5: # -0.5 미만인 확실한 악재만 기록
+                        # 가장 부정적인 뉴스 기록
+                        if score < min_score and score < -0.5:
                             min_score = score
                             worst_news_title = f"[{keyword}] {title}"
+                            worst_news_link = link
                             
                     except: continue
             
             avg_score = total_score / count if count > 0 else 0
-            return avg_score, worst_news_title
+            return avg_score, worst_news_title, worst_news_link
             
-        except: return 0, ""
+        except: return 0, "", ""
 
     def get_market_data(self):
         try:
             tickers = ['NQ=F', 'QQQ', '^VIX', 'DX-Y.NYB', 'SOXX', 'HYG', '^TNX', 'BTC-USD', '^IRX']
+            # 1분봉 제거 -> 다시 1시간봉(1h)으로 복귀 (가볍고 안정적)
             data = yf.download(tickers, period='5d', interval='1h', progress=False)
 
             if isinstance(data.columns, pd.MultiIndex): 
@@ -108,7 +113,7 @@ class DangerAlertBot:
         span_b = ichimoku.ichimoku_b().iloc[-1]
         rsi_val = RSIIndicator(close=df['Close'], window=14).rsi().iloc[-1]
         
-        # 실시간 호가 조회
+        # [수정] 1분봉 다운로드 로직 제거하고, 가벼운 호가 조회(fast_info)만 유지
         try:
             ticker_nq = yf.Ticker("NQ=F")
             realtime_price = ticker_nq.fast_info.get('last_price')
@@ -146,8 +151,8 @@ class DangerAlertBot:
         current_hyg = df['HYG'].iloc[-1]
         hyg_drawdown = (current_hyg - hyg_high) / hyg_high * 100
 
-        # ★ 뉴스 점수와 '최악의 뉴스'를 함께 받아옴
-        news_score, worst_news = self.get_news_sentiment()
+        # ★ 뉴스 정보 가져오기 (링크 포함)
+        news_score, worst_news_title, worst_news_link = self.get_news_sentiment()
 
         # --- 2. 위험 점수 산출 ---
         danger_score = 0
@@ -194,20 +199,23 @@ class DangerAlertBot:
             danger_score += 15
             reasons.append(f"💸 *자금 이탈*: 스마트머니(하이일드)가 **{hyg_drawdown:.2f}%** 빠져나갔습니다.")
 
-        # [F] 심리 & 뉴스 (상세 내용 포함)
+        # [F] 심리 & 뉴스
         current_vix = df['VIX'].iloc[-1]
         vix_trend = current_vix - df['VIX'].rolling(window=5).mean().iloc[-1]
         if vix_trend > 0.5:
             danger_score += 10
             reasons.append(f"😱 *공포 확산*: 변동성 지수(VIX)가 상승 추세입니다.")
         
-        # ★ 뉴스 상세 사유 추가
+        # ★ 뉴스 악재 발생 시 링크 제공
         if news_score < -0.2:
             danger_score += 10
-            news_msg = f"📰 *뉴스 악재*: AI 감성 점수 **{news_score:.2f}** (부정)"
-            # 구체적인 기사 제목이 있다면 덧붙임
-            if worst_news:
-                news_msg += f"\n  └ 원인: _{worst_news}_"
+            news_msg = f"📰 *뉴스 심리 악화*: AI 점수 **{news_score:.2f}** (부정)"
+            if worst_news_title:
+                # 텔레그램 마크다운 링크 형식: [텍스트](URL)
+                # 링크가 너무 길 수 있으니 '기사 원문 보기'로 표시
+                news_msg += f"\n  └ 원인: {worst_news_title}"
+                if worst_news_link:
+                    news_msg += f"\n  └ 🔗 [기사 원문 보기]({worst_news_link})"
             reasons.append(news_msg)
 
         danger_score = min(danger_score, 100)
