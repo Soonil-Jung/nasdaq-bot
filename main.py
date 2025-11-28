@@ -83,84 +83,104 @@ class DangerAlertBot:
         df = self.get_market_data()
         if df.empty: return
 
-        # --- 1. 모든 지표 계산 (Variables Calculation) ---
-        
-        # [A] 가격 및 변동성 (Price Action)
-        current_close = df['Close'].iloc[-1]
-        daily_chg = (current_close - df['Close'].iloc[-24]) / df['Close'].iloc[-24] * 100 # 24시간 등락
-        hourly_chg = (current_close - df['Close'].iloc[-2]) / df['Close'].iloc[-2] * 100  # 1시간 등락
-        
-        # [B] 거래량 (Volume)
+        # --- 1. 지표 계산 ---
         df['Vol_MA20'] = df['Volume'].rolling(window=20).mean()
-        avg_vol = df['Vol_MA20'].iloc[-1]
-        current_vol = df['Volume'].iloc[-1]
-        vol_ratio = 0 if avg_vol == 0 else current_vol / avg_vol
-        
-        # [C] 기술적 지표 (Ichimoku & RSI)
         ichimoku = IchimokuIndicator(high=df['High'], low=df['Low'], window1=9, window2=26, window3=52)
         span_a = ichimoku.ichimoku_a().iloc[-1]
         span_b = ichimoku.ichimoku_b().iloc[-1]
         rsi_val = RSIIndicator(close=df['Close'], window=14).rsi().iloc[-1]
         
-        # [D] 매크로 (Macro)
+        # ---------------------------------------------------------------
+        # ★ [핵심 수정] 차트 데이터 대신 '실시간 호가' 강제 조회
+        # ---------------------------------------------------------------
+        try:
+            # Ticker 객체 생성
+            ticker_nq = yf.Ticker("NQ=F")
+            
+            # fast_info에서 최신 체결가 가져오기 (차트 데이터보다 빠름)
+            # 장이 멈췄으면 'regularMarketPreviousClose' 등을 가져올 수도 있음
+            realtime_price = ticker_nq.fast_info.get('last_price')
+            
+            if realtime_price and not np.isnan(realtime_price):
+                current_close = realtime_price
+                print(f"✅ 실시간 호가 적용: {current_close}")
+            else:
+                # 호가 정보가 없으면 차트의 마지막 값 사용
+                current_close = df['Close'].iloc[-1]
+                print(f"⚠️ 실시간 호가 실패 -> 차트 종가 사용: {current_close}")
+                
+        except Exception as e:
+            print(f"호가 조회 에러({e}) -> 차트 데이터 사용")
+            current_close = df['Close'].iloc[-1]
+        # ---------------------------------------------------------------
+
+        # [A] 가격 변동성 (업데이트된 current_close 사용)
+        daily_chg = (current_close - df['Close'].iloc[-24]) / df['Close'].iloc[-24] * 100 
+        hourly_chg = (current_close - df['Close'].iloc[-2]) / df['Close'].iloc[-2] * 100  
+        
+        # [B] 거래량
+        avg_vol = df['Vol_MA20'].iloc[-1]
+        current_vol = df['Volume'].iloc[-1]
+        vol_ratio = 0 if avg_vol == 0 else current_vol / avg_vol
+        
+        # [C] 매크로
         current_dxy = df['DXY'].iloc[-1]
         dxy_chg = (current_dxy - df['DXY'].iloc[-24]) / df['DXY'].iloc[-24] * 100
         
-        current_tnx = df['TNX'].iloc[-1] # 10년물
-        current_irx = df['IRX'].iloc[-1] # 3개월물 (단기)
-        yield_spread = current_tnx - current_irx # 장단기 금리차
-        irx_chg = (current_irx - df['IRX'].iloc[-24]) / df['IRX'].iloc[-24] * 100 # 단기금리 변동
+        current_tnx = df['TNX'].iloc[-1]
+        current_irx = df['IRX'].iloc[-1]
+        yield_spread = current_tnx - current_irx
+        irx_chg = (current_irx - df['IRX'].iloc[-24]) / df['IRX'].iloc[-24] * 100
         
-        # [E] 리스크 자산 (Risk Assets)
+        # [D] 리스크 자산
         current_btc = df['BTC'].iloc[-1]
         btc_chg = (current_btc - df['BTC'].iloc[-24]) / df['BTC'].iloc[-24] * 100
         
-        # 반도체 괴리율 (나스닥 수익률 - 반도체 수익률)
-        nq_ret = df['Close'].iloc[-1] / df['Close'].iloc[-5] - 1
+        nq_ret = current_close / df['Close'].iloc[-5] - 1 # 현재가 반영
         soxx_ret = df['SOXX'].iloc[-1] / df['SOXX'].iloc[-5] - 1
         semi_weakness = nq_ret - soxx_ret 
-        
-        # 하이일드 고점 대비 하락률
+
         hyg_high = df['HYG'].max()
         current_hyg = df['HYG'].iloc[-1]
         hyg_drawdown = (current_hyg - hyg_high) / hyg_high * 100
-        
-        # [F] 심리 (Sentiment)
-        current_vix = df['VIX'].iloc[-1]
-        vix_trend = current_vix - df['VIX'].rolling(window=5).mean().iloc[-1] # 추세
+
         news_score = self.get_news_sentiment()
 
-        # --- 2. 위험 점수 산출 (Scoring) ---
+        # --- 2. 위험 점수 산출 ---
         danger_score = 0
         reasons = []
 
-        # 1. 가격 추세
-        if current_close < span_a:
-            danger_score += 20
-            reasons.append("☁️ 구름대 하단 이탈")
+        # 가격 하락
         if daily_chg < -1.5:
             danger_score += 20
-            reasons.append(f"📉 일간 추세 하락 ({daily_chg:.2f}%)")
+            reasons.append(f"📉 24시간 추세 하락 ({daily_chg:.2f}%)")
         if hourly_chg < -0.8:
             danger_score += 15
             reasons.append(f"⚡ 1시간 급락 ({hourly_chg:.2f}%)")
 
-        # 2. 거래량
+        # 구름대
+        cloud_str = "구름대 위 (안정)"
+        if current_close < span_a:
+            danger_score += 20
+            reasons.append("☁️ 구름대 하단 이탈")
+            cloud_str = "하단 이탈 🚨"
+        elif current_close < span_b: 
+            cloud_str = "구름대 내부 (혼조)"
+
+        # 거래량
         if vol_ratio > 1.5:
             danger_score += 15
             reasons.append(f"📢 거래량 폭증 ({vol_ratio:.1f}배)")
 
-        # 3. 매크로
+        # 매크로
         if dxy_chg > 0.3:
             danger_score += 10
             reasons.append(f"💵 달러 강세 (+{dxy_chg:.2f}%)")
         if irx_chg > 2.0:
             danger_score += 10
             reasons.append(f"🏦 단기금리 급등 (+{irx_chg:.1f}%)")
-        if yield_spread < -0.8: # 역전 심화 시 점수 반영은 선택사항(여기선 알림만)
-            pass 
 
-        # 4. 리스크 자산
+        # 리스크 자산
         if btc_chg < -3.0: 
             danger_score += 15
             reasons.append(f"📉 비트코인 급락 ({btc_chg:.2f}%)")
@@ -171,7 +191,9 @@ class DangerAlertBot:
             danger_score += 15
             reasons.append(f"💸 스마트머니 이탈 ({hyg_drawdown:.2f}%)")
 
-        # 5. 심리
+        # 심리
+        current_vix = df['VIX'].iloc[-1]
+        vix_trend = current_vix - df['VIX'].rolling(window=5).mean().iloc[-1]
         if vix_trend > 0.5:
             danger_score += 10
             reasons.append(f"😱 공포지수 확산")
@@ -179,14 +201,10 @@ class DangerAlertBot:
             danger_score += 10
             reasons.append(f"📰 뉴스 심리 악화")
 
-        # 점수 Cap
         danger_score = min(danger_score, 100)
 
-        # --- 3. 메시지 작성 (Full Report) ---
-        
-        # 상태 문자열 정의
+        # --- 3. 메시지 작성 ---
         status_emoji = '🔴 위험 (매도)' if danger_score >= 60 else '🟡 주의 (관망)' if danger_score >= 35 else '🟢 안정 (매수)'
-        cloud_str = "하단 이탈 🚨" if current_close < span_a else ("구름대 안 ☁️" if current_close < span_b else "구름대 위 ✅")
         spread_str = "정상 ✅" if yield_spread >= 0 else "역전(침체) ⚠️"
         semi_str = "약세 ⚠️" if semi_weakness > 0.005 else "양호 ✅"
         hyg_str = "이탈 ⚠️" if hyg_drawdown < -0.3 else "유입 ✅"
@@ -208,7 +226,7 @@ class DangerAlertBot:
         
         msg += "2️⃣ 매크로 지표 (Macro)\n"
         msg += f"• 달러(DXY): {current_dxy:.2f} ({dxy_chg:+.2f}%)\n"
-        msg += f"• 3개월금리 : {current_irx:.2f}% (Fed기대)\n"
+        msg += f"• 3개월금리 : {current_irx:.2f}% ({irx_chg:+.1f}%)\n"
         msg += f"• 10년금리 : {current_tnx:.2f}% (시장금리)\n"
         msg += f"• 장단기차 : {yield_spread:.2f}p ({spread_str})\n\n"
         
@@ -222,13 +240,14 @@ class DangerAlertBot:
         msg += f"• 뉴스점수 : {news_score:.2f} (-1~+1)\n"
         msg += "───────────────\n"
         
-        msg += "📋 [위험 점수 반영 내역]\n"
+        msg += "📋 [위험 점수 증가 사유]\n"
         if reasons:
             msg += "\n".join(["🚨 " + r for r in reasons])
         else:
             msg += "✅ 특이사항 없음 (안정적)"
 
         self.send_telegram(msg)
+
 
 if __name__ == "__main__":
     bot = DangerAlertBot()
