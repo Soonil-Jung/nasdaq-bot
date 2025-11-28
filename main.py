@@ -10,14 +10,14 @@ from GoogleNews import GoogleNews
 from datetime import datetime, timedelta
 
 # ======================================================
-# ▼▼▼ 사용자 설정 정보 (GitHub Secrets 사용 시 os.environ 유지) ▼▼▼
+# ▼▼▼ 사용자 설정 정보 ▼▼▼
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
 # ======================================================
 
 class DangerAlertBot:
     def __init__(self):
-        print("🤖 AI 시스템(Full-Variables Ver) 가동 중...")
+        print("🤖 AI 시스템(Deep-News Ver) 가동 중...")
         try:
             self.tokenizer = BertTokenizer.from_pretrained('ProsusAI/finbert')
             self.model = BertForSequenceClassification.from_pretrained('ProsusAI/finbert')
@@ -28,29 +28,47 @@ class DangerAlertBot:
     def send_telegram(self, message):
         if not TELEGRAM_TOKEN: return
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        data = {"chat_id": TELEGRAM_CHAT_ID, "text": message}
+        data = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown"}
         try: requests.post(url, data=data)
         except: pass
 
     def get_news_sentiment(self):
+        # 점수뿐만 아니라 '가장 부정적인 뉴스 제목'도 반환하도록 수정
         try:
             googlenews = GoogleNews(lang='en', period='1d')
             total_score = 0
             count = 0
+            
+            # 가장 부정적인 뉴스를 찾기 위한 변수
+            worst_news_title = ""
+            min_score = 1.0 # 최악의 점수 기록용 (낮을수록 나쁨)
+
             for keyword in self.keywords:
                 googlenews.clear()
                 googlenews.search(keyword)
                 results = googlenews.results(sort=True)
                 if not results: continue
+                
                 for item in results[:2]:
                     try:
-                        res = self.nlp(item['title'][:512])[0]
+                        title = item['title']
+                        res = self.nlp(title[:512])[0]
                         score = res['score'] if res['label'] == 'positive' else -res['score'] if res['label'] == 'negative' else 0
+                        
                         total_score += score
                         count += 1
+                        
+                        # 가장 부정적인(점수가 낮은) 뉴스 기억하기
+                        if score < min_score and score < -0.5: # -0.5 미만인 확실한 악재만 기록
+                            min_score = score
+                            worst_news_title = f"[{keyword}] {title}"
+                            
                     except: continue
-            return total_score / count if count > 0 else 0
-        except: return 0
+            
+            avg_score = total_score / count if count > 0 else 0
+            return avg_score, worst_news_title
+            
+        except: return 0, ""
 
     def get_market_data(self):
         try:
@@ -90,31 +108,15 @@ class DangerAlertBot:
         span_b = ichimoku.ichimoku_b().iloc[-1]
         rsi_val = RSIIndicator(close=df['Close'], window=14).rsi().iloc[-1]
         
-        # ---------------------------------------------------------------
-        # ★ [핵심 수정] 차트 데이터 대신 '실시간 호가' 강제 조회
-        # ---------------------------------------------------------------
+        # 실시간 호가 조회
         try:
-            # Ticker 객체 생성
             ticker_nq = yf.Ticker("NQ=F")
-            
-            # fast_info에서 최신 체결가 가져오기 (차트 데이터보다 빠름)
-            # 장이 멈췄으면 'regularMarketPreviousClose' 등을 가져올 수도 있음
             realtime_price = ticker_nq.fast_info.get('last_price')
-            
-            if realtime_price and not np.isnan(realtime_price):
-                current_close = realtime_price
-                print(f"✅ 실시간 호가 적용: {current_close}")
-            else:
-                # 호가 정보가 없으면 차트의 마지막 값 사용
-                current_close = df['Close'].iloc[-1]
-                print(f"⚠️ 실시간 호가 실패 -> 차트 종가 사용: {current_close}")
-                
-        except Exception as e:
-            print(f"호가 조회 에러({e}) -> 차트 데이터 사용")
+            current_close = realtime_price if (realtime_price and not np.isnan(realtime_price)) else df['Close'].iloc[-1]
+        except:
             current_close = df['Close'].iloc[-1]
-        # ---------------------------------------------------------------
 
-        # [A] 가격 변동성 (업데이트된 current_close 사용)
+        # [A] 가격 변동성
         daily_chg = (current_close - df['Close'].iloc[-24]) / df['Close'].iloc[-24] * 100 
         hourly_chg = (current_close - df['Close'].iloc[-2]) / df['Close'].iloc[-2] * 100  
         
@@ -136,7 +138,7 @@ class DangerAlertBot:
         current_btc = df['BTC'].iloc[-1]
         btc_chg = (current_btc - df['BTC'].iloc[-24]) / df['BTC'].iloc[-24] * 100
         
-        nq_ret = current_close / df['Close'].iloc[-5] - 1 # 현재가 반영
+        nq_ret = current_close / df['Close'].iloc[-5] - 1
         soxx_ret = df['SOXX'].iloc[-1] / df['SOXX'].iloc[-5] - 1
         semi_weakness = nq_ret - soxx_ret 
 
@@ -144,62 +146,69 @@ class DangerAlertBot:
         current_hyg = df['HYG'].iloc[-1]
         hyg_drawdown = (current_hyg - hyg_high) / hyg_high * 100
 
-        news_score = self.get_news_sentiment()
+        # ★ 뉴스 점수와 '최악의 뉴스'를 함께 받아옴
+        news_score, worst_news = self.get_news_sentiment()
 
         # --- 2. 위험 점수 산출 ---
         danger_score = 0
         reasons = []
 
-        # 가격 하락
+        # [A] 가격 추세
         if daily_chg < -1.5:
             danger_score += 20
-            reasons.append(f"📉 24시간 추세 하락 ({daily_chg:.2f}%)")
+            reasons.append(f"📉 *추세 하락*: 24시간 동안 **{daily_chg:.2f}%** 하락했습니다.")
         if hourly_chg < -0.8:
             danger_score += 15
-            reasons.append(f"⚡ 1시간 급락 ({hourly_chg:.2f}%)")
+            reasons.append(f"⚡ *투매 발생*: 1시간 만에 **{hourly_chg:.2f}%** 급락했습니다.")
 
-        # 구름대
+        # [B] 구름대
         cloud_str = "구름대 위 (안정)"
         if current_close < span_a:
             danger_score += 20
-            reasons.append("☁️ 구름대 하단 이탈")
+            reasons.append("☁️ *지지선 붕괴*: 일목균형표 구름대 하단을 이탈했습니다.")
             cloud_str = "하단 이탈 🚨"
         elif current_close < span_b: 
             cloud_str = "구름대 내부 (혼조)"
 
-        # 거래량
+        # [C] 거래량
         if vol_ratio > 1.5:
             danger_score += 15
-            reasons.append(f"📢 거래량 폭증 ({vol_ratio:.1f}배)")
+            reasons.append(f"📢 *패닉 셀링*: 거래량이 평소의 **{vol_ratio:.1f}배**로 폭발했습니다.")
 
-        # 매크로
+        # [D] 매크로
         if dxy_chg > 0.3:
             danger_score += 10
-            reasons.append(f"💵 달러 강세 (+{dxy_chg:.2f}%)")
+            reasons.append(f"💵 *달러 강세*: 달러 인덱스가 **+{dxy_chg:.2f}%** 급등했습니다.")
         if irx_chg > 2.0:
             danger_score += 10
-            reasons.append(f"🏦 단기금리 급등 (+{irx_chg:.1f}%)")
+            reasons.append(f"🏦 *긴축 공포*: 단기 금리가 **+{irx_chg:.1f}%** 치솟았습니다.")
 
-        # 리스크 자산
+        # [E] 리스크 자산
         if btc_chg < -3.0: 
             danger_score += 15
-            reasons.append(f"📉 비트코인 급락 ({btc_chg:.2f}%)")
+            reasons.append(f"📉 *코인 급락*: 위험자산 회피로 비트코인이 **{btc_chg:.2f}%** 하락했습니다.")
         if semi_weakness > 0.005:
             danger_score += 10
-            reasons.append(f"📉 반도체 상대적 약세")
+            reasons.append(f"📉 *주도주 균열*: 반도체 섹터가 나스닥보다 약세입니다.")
         if hyg_drawdown < -0.3:
             danger_score += 15
-            reasons.append(f"💸 스마트머니 이탈 ({hyg_drawdown:.2f}%)")
+            reasons.append(f"💸 *자금 이탈*: 스마트머니(하이일드)가 **{hyg_drawdown:.2f}%** 빠져나갔습니다.")
 
-        # 심리
+        # [F] 심리 & 뉴스 (상세 내용 포함)
         current_vix = df['VIX'].iloc[-1]
         vix_trend = current_vix - df['VIX'].rolling(window=5).mean().iloc[-1]
         if vix_trend > 0.5:
             danger_score += 10
-            reasons.append(f"😱 공포지수 확산")
+            reasons.append(f"😱 *공포 확산*: 변동성 지수(VIX)가 상승 추세입니다.")
+        
+        # ★ 뉴스 상세 사유 추가
         if news_score < -0.2:
             danger_score += 10
-            reasons.append(f"📰 뉴스 심리 악화")
+            news_msg = f"📰 *뉴스 악재*: AI 감성 점수 **{news_score:.2f}** (부정)"
+            # 구체적인 기사 제목이 있다면 덧붙임
+            if worst_news:
+                news_msg += f"\n  └ 원인: _{worst_news}_"
+            reasons.append(news_msg)
 
         danger_score = min(danger_score, 100)
 
@@ -212,42 +221,41 @@ class DangerAlertBot:
         
         now_kst = datetime.now() + timedelta(hours=9)
         
-        msg = f"🔔 [AI 퀀트 전체 변수 리포트]\n"
+        msg = f"🔔 *AI 퀀트 시장 정밀 분석*\n"
         msg += f"📅 {now_kst.strftime('%Y-%m-%d %H:%M')} (KST)\n"
-        msg += f"🚦 상태: {status_emoji}\n"
-        msg += f"🔥 점수: {danger_score}점 / 100점\n\n"
+        msg += f"🚦 종합상태: {status_emoji}\n"
+        msg += f"🔥 위험점수: *{danger_score}점* / 100점\n\n"
         
-        msg += "1️⃣ 가격 & 거래량 (Technical)\n"
+        msg += "*1️⃣ 가격 & 거래량 (Technical)*\n"
         msg += f"• 나스닥 : {current_close:,.2f} (24h: {daily_chg:+.2f}%)\n"
         msg += f"• 1시간봉 : {hourly_chg:+.2f}% (단기변동)\n"
         msg += f"• 거래강도 : 평소의 {int(vol_ratio*100)}%\n"
         msg += f"• RSI(14) : {rsi_val:.1f}\n"
         msg += f"• 일목구름 : {cloud_str}\n\n"
         
-        msg += "2️⃣ 매크로 지표 (Macro)\n"
+        msg += "*2️⃣ 매크로 지표 (Macro)*\n"
         msg += f"• 달러(DXY): {current_dxy:.2f} ({dxy_chg:+.2f}%)\n"
         msg += f"• 3개월금리 : {current_irx:.2f}% ({irx_chg:+.1f}%)\n"
         msg += f"• 10년금리 : {current_tnx:.2f}% (시장금리)\n"
         msg += f"• 장단기차 : {yield_spread:.2f}p ({spread_str})\n\n"
         
-        msg += "3️⃣ 리스크 자산 (Risk Asset)\n"
+        msg += "*3️⃣ 리스크 자산 (Risk Asset)*\n"
         msg += f"• 비트코인 : ${current_btc:,.0f} ({btc_chg:+.2f}%)\n"
         msg += f"• 반도체비 : {semi_str} (괴리: {semi_weakness*100:.1f}%)\n"
         msg += f"• 하이일드 : {hyg_str} (낙폭: {hyg_drawdown:.2f}%)\n\n"
         
-        msg += "4️⃣ 시장 심리 (Sentiment)\n"
+        msg += "*4️⃣ 시장 심리 (Sentiment)*\n"
         msg += f"• 공포(VIX): {current_vix:.2f} (추세: {vix_str})\n"
         msg += f"• 뉴스점수 : {news_score:.2f} (-1~+1)\n"
         msg += "───────────────\n"
         
-        msg += "📋 [위험 점수 증가 사유]\n"
+        msg += "*📋 [상세 위험 요인 분석]*\n"
         if reasons:
             msg += "\n".join(["🚨 " + r for r in reasons])
         else:
             msg += "✅ 특이사항 없음 (안정적)"
 
         self.send_telegram(msg)
-
 
 if __name__ == "__main__":
     bot = DangerAlertBot()
