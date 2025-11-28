@@ -48,19 +48,21 @@ class DangerAlertBot:
         except: pass
 
     # 실시간 가격 강제 조회 (선물/주식 공용)
+    # [수정된 함수] 모든 종목(선물 포함)의 프리마켓 데이터 강제 수신
     def get_realtime_price(self, ticker):
         try:
-            # 1. 1분봉 데이터 요청 (가장 확실한 최신가)
             stock = yf.Ticker(ticker)
-            # 선물(NQ=F)은 prepost=False가 더 안정적일 수 있음 (데이터 소스 특성상)
-            use_prepost = True if ticker != 'NQ=F' else False
             
-            df = stock.history(period='1d', interval='1m', prepost=use_prepost)
+            # 1. 1분봉 데이터 요청
+            # ★ 수정됨: 선물(NQ=F)이든 뭐든 무조건 prepost=True로 설정하여 
+            # 지금 당장 거래되고 있는 가격을 가져오게 변경
+            df = stock.history(period='1d', interval='1m', prepost=True)
             
             if not df.empty:
                 return df['Close'].iloc[-1]
             
-            # 2. 실패 시 fast_info 시도
+            # 2. 실패 시 fast_info 시도 (2차 백업)
+            # 호가 정보가 있으면 그걸 우선 사용
             if stock.fast_info.get('last_price'):
                 return stock.fast_info.get('last_price')
                 
