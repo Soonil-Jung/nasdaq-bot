@@ -14,20 +14,21 @@ from datetime import datetime, timedelta
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
 
+# [수정] 요청하신 순서대로 리스트업 (이 순서대로 메시지가 전송됩니다)
 TARGET_STOCKS = {
-    'AAPL': 'Apple stock',
-    'MSFT': 'Microsoft stock',
     'GOOGL': 'Google Alphabet stock',
+    'MSFT': 'Microsoft stock',
     'TSLA': 'Tesla stock Elon Musk',
     'NVDA': 'Nvidia stock',
     'AMD': 'AMD stock',
-    'PLTR': 'Palantir stock'
+    'PLTR': 'Palantir stock',
+    'AAPL': 'Apple stock'
 }
 # ======================================================
 
 class DangerAlertBot:
     def __init__(self):
-        print("🤖 AI 시스템(PreMarket-Fix Ver) 가동 중...")
+        print("🤖 AI 시스템(Fixed-Order Ver) 가동 중...")
         try:
             self.tokenizer = BertTokenizer.from_pretrained('ProsusAI/finbert')
             self.model = BertForSequenceClassification.from_pretrained('ProsusAI/finbert')
@@ -46,13 +47,15 @@ class DangerAlertBot:
         try: requests.post(url, data=data)
         except: pass
 
-    # ★ [핵심 수정] prepost=True 옵션 추가 (프리마켓 데이터 강제 수신)
+    # 실시간 가격 강제 조회 (선물/주식 공용)
     def get_realtime_price(self, ticker):
         try:
-            # 1. history 함수 사용 (download보다 prepost 옵션이 더 잘 먹힘)
-            # period='1d', interval='1m', prepost=True (장전/장후 데이터 포함)
+            # 1. 1분봉 데이터 요청 (가장 확실한 최신가)
             stock = yf.Ticker(ticker)
-            df = stock.history(period='1d', interval='1m', prepost=True)
+            # 선물(NQ=F)은 prepost=False가 더 안정적일 수 있음 (데이터 소스 특성상)
+            use_prepost = True if ticker != 'NQ=F' else False
+            
+            df = stock.history(period='1d', interval='1m', prepost=use_prepost)
             
             if not df.empty:
                 return df['Close'].iloc[-1]
@@ -103,8 +106,6 @@ class DangerAlertBot:
 
     def get_market_data(self):
         try:
-            # 차트 데이터는 그대로 1시간봉 사용 (지표 계산용)
-            # 여기서는 prepost=False 유지 (보조지표는 정규장 기준이 노이즈가 적음)
             macro_tickers = ['NQ=F', 'QQQ', '^VIX', 'DX-Y.NYB', 'SOXX', 'HYG', '^TNX', 'BTC-USD', '^IRX']
             all_tickers = macro_tickers + list(TARGET_STOCKS.keys())
             
@@ -147,11 +148,10 @@ class DangerAlertBot:
     def analyze_individual(self, ticker, df_stock, df_macro):
         if df_stock.empty: return None
 
-        # [1] 실시간 가격 (프리마켓 반영)
+        # 실시간 가격 (1분봉 강제 조회)
         live_price = self.get_realtime_price(ticker)
         current_price = live_price if live_price else df_stock['Close'].iloc[-1]
 
-        # 등락률 계산 (전일 종가 대비)
         try:
             prev_close = yf.Ticker(ticker).info.get('previousClose')
             if not prev_close: prev_close = df_stock['Close'].iloc[-8]
@@ -159,7 +159,6 @@ class DangerAlertBot:
 
         daily_pct = (current_price - prev_close) / prev_close * 100
 
-        # [2] 기술적 지표
         ichimoku = IchimokuIndicator(high=df_stock['High'], low=df_stock['Low'], window1=9, window2=26, window3=52)
         span_a = ichimoku.ichimoku_a().iloc[-1]
         rsi_val = RSIIndicator(close=df_stock['Close'], window=14).rsi().iloc[-1]
@@ -180,14 +179,11 @@ class DangerAlertBot:
         except: pass
         relative_strength = daily_pct - qqq_chg
 
-        # [3] 뉴스 분석
         search_keyword = TARGET_STOCKS.get(ticker, ticker)
         news_score, worst_news, worst_link, worst_source = self.get_news_sentiment(search_keyword)
 
-        # [4] 위험 점수
         danger_score = 0
         reasons = []
-
         high_beta = ['TSLA', 'NVDA', 'AMD', 'PLTR']
         drop_threshold = -3.5 if ticker in high_beta else -2.0
 
@@ -235,7 +231,7 @@ class DangerAlertBot:
         span_b = ichimoku.ichimoku_b().iloc[-1]
         rsi_val = RSIIndicator(close=df['Close'], window=14).rsi().iloc[-1]
         
-        # ★ 실시간 호가 (프리마켓 반영)
+        # ★ [수정] 나스닥 선물도 '실시간 조회 함수' 사용 (멈춤 해결)
         live_price = self.get_realtime_price('NQ=F')
         if live_price:
             current_close = live_price
@@ -256,9 +252,7 @@ class DangerAlertBot:
         yield_spread = current_tnx - current_irx
         irx_chg = (current_irx - df['IRX'].iloc[-24]) / df['IRX'].iloc[-24] * 100
         
-        # 비트코인은 항상 실시간
-        live_btc = self.get_realtime_price('BTC-USD')
-        current_btc = live_btc if live_btc else df['BTC'].iloc[-1]
+        current_btc = df['BTC'].iloc[-1]
         btc_chg = (current_btc - df['BTC'].iloc[-24]) / df['BTC'].iloc[-24] * 100
         
         nq_ret = current_close / df['Close'].iloc[-5] - 1
@@ -287,15 +281,18 @@ class DangerAlertBot:
         if news_score < -0.2: danger_score += 10; reasons.append(f"📰 뉴스 심리 악화")
         danger_score = min(danger_score, 100)
 
-        # --- [PART 2] 개별 종목 ---
+        # --- [PART 2] 개별 종목 분석 (순서 고정) ---
         stock_results = []
+        # TARGET_STOCKS 딕셔너리의 키 순서대로 반복
         for ticker in TARGET_STOCKS.keys():
             if ticker in dfs:
                 res = self.analyze_individual(ticker, dfs[ticker], df)
                 if res: stock_results.append(res)
-        stock_results.sort(key=lambda x: x['score'], reverse=True)
+        
+        # ★ [수정] 위험도순 정렬 코드 제거 (지정된 순서 유지)
+        # stock_results.sort(key=lambda x: x['score'], reverse=True) 
 
-        # --- [PART 3] 메시지 ---
+        # --- [PART 3] 메시지 작성 ---
         status_emoji = '🔴 위험' if danger_score >= 60 else '🟡 주의' if danger_score >= 35 else '🟢 안정'
         cloud_str = "하단 이탈 🚨" if current_close < span_a else "구름대 위 ✅"
         spread_str = "정상 ✅" if yield_spread >= 0 else "역전(침체) ⚠️"
@@ -341,7 +338,7 @@ class DangerAlertBot:
             msg += "✅ 특이사항 없음 (안정적)"
 
         msg += "\n\n───────────────\n"
-        msg += "*📊 종목별 위험도 (현재가/등락률)*\n"
+        msg += "*📊 개별 종목 분석 (지정 순서)*\n"
         
         for item in stock_results:
             icon = "🔴" if item['score'] >= 60 else "🟡" if item['score'] >= 30 else "🟢"
