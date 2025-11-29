@@ -15,6 +15,7 @@ from datetime import datetime, timedelta
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
 
+# 개별 종목 (순서 고정)
 TARGET_STOCKS = {
     'GOOGL': 'Google Alphabet stock',
     'MSFT': 'Microsoft stock',
@@ -28,16 +29,60 @@ TARGET_STOCKS = {
 
 class DangerAlertBot:
     def __init__(self):
-        print("🤖 AI 시스템(v25-Smart-Weekend) 가동 중...")
+        print("🤖 AI 시스템(Final-v28-Keyword-Complete) 가동 중...")
         try:
             self.tokenizer = BertTokenizer.from_pretrained('ProsusAI/finbert')
             self.model = BertForSequenceClassification.from_pretrained('ProsusAI/finbert')
             self.nlp = pipeline("sentiment-analysis", model=self.model, tokenizer=self.tokenizer)
         except: pass
         
+        # ★ [최종 보강] 시장의 모든 이슈를 잡아내는 키워드 리스트
         self.macro_keywords = [
-            'Jerome Powell', 'Donald Trump', 'Fed Rate', 'Recession', 
-            'Morgan Stanley', 'JP Morgan', 'Goldman Sachs', 'Michael Burry', 'Bloomberg Markets'
+            # 1. 연준(Fed) & 통화정책 (약어 포함)
+            'Federal Reserve',  # 공식 명칭
+            'The Fed',          # 가장 많이 쓰이는 약어
+            'US Fed',           # 명확한 약어
+            'FOMC',             # 금리 결정 회의
+            'Fed Rate',         # 금리 관련 일반
+            'Quantitative Tightening', # 양적 긴축 (QT)
+
+            # 2. 핵심 인물 (빅마우스 & 정책 결정자)
+            'Jerome Powell',    # 연준 의장
+            'John Williams',    # 뉴욕 연은 총재 (2인자)
+            'Christopher Waller', # 연준 이사 (매파/비둘기파 풍향계)
+            'Donald Trump',     # 대통령
+            'Nick Timiraos',    # 연준 비공식 대변인 (WSJ)
+            'Scott Bessent',    # 재무장관 (환율/국채)
+            'Kevin Warsh',      # 차기 의장 후보
+            'Jamie Dimon',      # JP모건 회장
+            'Bill Ackman',      # 채권왕
+            'Larry Fink',       # 블랙록 회장
+            'Michael Burry',    # 빅쇼트
+
+            # 3. 인플레이션 & 경기 (핵심 지표)
+            'CPI Inflation',    # 소비자 물가
+            'PCE Inflation',    # 개인소비지출 (연준 선호)
+            'PPI Inflation',    # 생산자 물가
+            'Stagflation',      # 스태그플레이션
+            'Recession',        # 경기 침체
+            'GDP Growth',       # 경제 성장률
+
+            # 4. 고용 & 소비 (경기 체력)
+            'Jobs Report',      # 고용 보고서 통칭
+            'Nonfarm Payrolls', # 비농업 고용 (가장 중요)
+            'Unemployment Rate',# 실업률
+            'ADP Report',       # 민간 고용
+            'JOLTS',            # 구인 이직 (노동 수요)
+            'Initial Jobless Claims', # 신규 실업수당 청구
+            'Retail Sales',     # 소매 판매 (소비 경기)
+            'Consumer Confidence', # 소비자 신뢰지수
+            'PMI',              # 구매관리자지수 (경기 선행)
+
+            # 5. 정부 & 시황
+            'US Treasury',      # 재무부 (국채 발행 이슈)
+            'White House Economy', # 백악관 경제 논평
+            'Bloomberg Markets',   # 블룸버그 시황
+            'Wall Street Journal'  # WSJ 시황
         ]
 
     def send_telegram(self, message):
@@ -47,17 +92,22 @@ class DangerAlertBot:
         try: requests.post(url, data=data)
         except: pass
 
+    # 실시간 데이터 강제 조회 (프리마켓/장전후 포함)
     def get_realtime_price(self, ticker):
         try:
             stock = yf.Ticker(ticker)
-            df = stock.history(period='1d', interval='1m', prepost=True, auto_adjust=True)
+            # 1분봉 데이터 요청 (prepost=True)
+            df = stock.history(period='1d', interval='1m', prepost=True)
             if not df.empty:
                 return df['Close'].iloc[-1]
+            
+            # 실패 시 호가 정보 사용
             if stock.fast_info.get('last_price'):
                 return stock.fast_info.get('last_price')
         except: pass
         return None
 
+    # 펀더멘털 데이터 (샴의 법칙 & CPI)
     def get_fundamental_data(self):
         try:
             start_date = datetime.now() - timedelta(days=700)
@@ -74,7 +124,12 @@ class DangerAlertBot:
             is_recession = sahm_score >= 0.50
             cpi_yoy = (cpi['CPIAUCSL'].iloc[-1] - cpi['CPIAUCSL'].iloc[-13]) / cpi['CPIAUCSL'].iloc[-13] * 100
             
-            return {"unrate": unrate['UNRATE'].iloc[-1], "sahm_score": sahm_score, "is_recession": is_recession, "cpi_yoy": cpi_yoy}
+            return {
+                "unrate": unrate['UNRATE'].iloc[-1],
+                "sahm_score": sahm_score,
+                "is_recession": is_recession,
+                "cpi_yoy": cpi_yoy
+            }
         except: return None
 
     def get_news_sentiment(self, target_keywords):
@@ -119,7 +174,8 @@ class DangerAlertBot:
             macro_tickers = ['NQ=F', 'QQQ', '^VIX', 'DX-Y.NYB', 'SOXX', 'HYG', '^TNX', 'BTC-USD', '^IRX']
             all_tickers = macro_tickers + list(TARGET_STOCKS.keys())
             
-            data = yf.download(all_tickers, period='5d', interval='1h', progress=False, ignore_tz=True, auto_adjust=True)
+            # 차트 분석용 1시간봉 (지표 계산)
+            data = yf.download(all_tickers, period='5d', interval='1h', progress=False)
 
             if isinstance(data.columns, pd.MultiIndex): 
                 dfs = {}
@@ -136,7 +192,8 @@ class DangerAlertBot:
                     if ticker in data['Close'].columns:
                         df_macro[col] = data['Close'][ticker]
                     else: df_macro[col] = np.nan
-
+                
+                df_macro.index = pd.to_datetime(df_macro.index).tz_localize(None)
                 df_macro = df_macro.ffill().bfill().dropna()
                 dfs['MACRO'] = df_macro
 
@@ -147,6 +204,7 @@ class DangerAlertBot:
                         df_stock['High'] = data['High'][ticker]
                         df_stock['Low'] = data['Low'][ticker]
                         df_stock['Volume'] = data['Volume'][ticker]
+                        df_stock.index = pd.to_datetime(df_stock.index).tz_localize(None)
                         df_stock = df_stock.dropna()
                         dfs[ticker] = df_stock
                 return dfs
@@ -154,8 +212,9 @@ class DangerAlertBot:
         except: return {}
 
     def analyze_individual(self, ticker, df_stock, df_macro):
-        if df_stock.empty or len(df_stock) < 10: return None
+        if df_stock.empty: return None
 
+        # [1] 실시간 가격 (프리마켓 반영)
         live_price = self.get_realtime_price(ticker)
         current_price = live_price if live_price else df_stock['Close'].iloc[-1]
 
@@ -230,23 +289,21 @@ class DangerAlertBot:
 
     def analyze_danger(self):
         dfs = self.get_market_data()
-        if not dfs or 'MACRO' not in dfs or dfs['MACRO'].empty: return
+        if not dfs or 'MACRO' not in dfs: return
         df = dfs['MACRO']
         if len(df) < 20: return
 
         # --- 요일 확인 (주말 여부) ---
         now_kst = datetime.now() + timedelta(hours=9)
-        weekday = now_kst.weekday() # 0:월 ~ 6:일
+        weekday = now_kst.weekday() 
         hour = now_kst.hour
         
-        # 토요일(5) 오전 9시 이후 ~ 일요일(6) 전체 -> '주말 모드'
+        # 토 09시 ~ 월 08시
         is_weekend_mode = False
-        if weekday == 6: # 일요일
-            is_weekend_mode = True
-        elif weekday == 5 and hour >= 9: # 토요일 오전 9시 이후
-            is_weekend_mode = True
+        if weekday == 6: is_weekend_mode = True
+        elif weekday == 5 and hour >= 9: is_weekend_mode = True
+        elif weekday == 0 and hour < 8: is_weekend_mode = True
 
-        # --- [공통] 매크로 & 뉴스 데이터 준비 ---
         live_btc = self.get_realtime_price('BTC-USD')
         current_btc = live_btc if live_btc else df['BTC'].iloc[-1]
         idx_day = -24 if len(df) >= 24 else 0
@@ -254,36 +311,27 @@ class DangerAlertBot:
         
         news_score, worst_title, worst_link, worst_source = self.get_news_sentiment(self.macro_keywords)
 
-        # -----------------------------------------------------------
-        # [MODE 1] 주말 모드: 비트코인 + 뉴스만 브리핑
-        # -----------------------------------------------------------
+        # === [MODE 1: 주말 브리핑] ===
         if is_weekend_mode:
             btc_emoji = "🔥 급등" if btc_chg > 3 else "📉 급락" if btc_chg < -3 else "➡️ 횡보"
             news_emoji = "😊 호재/중립" if news_score >= -0.2 else "🚨 악재 우세"
             
             msg = f"☕ *주말 시장 핵심 브리핑*\n"
             msg += f"📅 {now_kst.strftime('%Y-%m-%d %H:%M')} (KST)\n\n"
-            
-            msg += "*1️⃣ 비트코인 (24h Live)*\n"
+            msg += f"*1️⃣ 비트코인 (24h Live)*\n"
             msg += f"• 가격 : ${current_btc:,.0f} ({btc_chg:+.2f}%)\n"
             msg += f"• 추세 : {btc_emoji}\n\n"
-            
-            msg += "*2️⃣ 주말 주요 뉴스*\n"
+            msg += f"*2️⃣ 주말 주요 뉴스*\n"
             msg += f"• 심리점수 : {news_score:.2f} ({news_emoji})\n"
             if worst_title and news_score < -0.2:
                 source_tag = f"[{worst_source}]" if worst_source else "[News]"
                 msg += f"  └ 🗞 {source_tag} [{worst_title[:30]}...]({worst_link})\n"
             elif news_score >= -0.2:
                 msg += "  └ 특이사항 없는 평온한 주말입니다.\n"
-                
             self.send_telegram(msg)
-            return  # 주말 모드 종료 (아래 코드 실행 안 함)
+            return
 
-        # -----------------------------------------------------------
-        # [MODE 2] 평일 모드: 전체 풀 리포트 (기존 v24 로직)
-        # -----------------------------------------------------------
-        
-        # ... (기존 지표 계산 로직 생략 없이 그대로 수행) ...
+        # === [MODE 2: 평일 풀 리포트] ===
         df['Vol_MA20'] = df['Volume'].rolling(window=20).mean()
         ichimoku = IchimokuIndicator(high=df['High'], low=df['Low'], window1=9, window2=26, window3=52)
         span_a = ichimoku.ichimoku_a().iloc[-1]
@@ -295,12 +343,14 @@ class DangerAlertBot:
         idx_hour = -2 if len(df) >= 2 else 0
         daily_chg = (current_close - df['Close'].iloc[idx_day]) / df['Close'].iloc[idx_day] * 100 
         hourly_chg = (current_close - df['Close'].iloc[idx_hour]) / df['Close'].iloc[idx_hour] * 100
+        
         avg_vol = df['Vol_MA20'].iloc[-1]
         current_vol = df['Volume'].iloc[-1]
         vol_ratio = 0 if avg_vol == 0 else current_vol / avg_vol
         
         current_dxy = self.get_realtime_price('DX-Y.NYB') or df['DXY'].iloc[-1]
         dxy_chg = (current_dxy - df['DXY'].iloc[idx_day]) / df['DXY'].iloc[idx_day] * 100
+        
         current_tnx = self.get_realtime_price('^TNX') or df['TNX'].iloc[-1]
         current_irx = self.get_realtime_price('^IRX') or df['IRX'].iloc[-1]
         yield_spread = current_tnx - current_irx
@@ -309,14 +359,15 @@ class DangerAlertBot:
         nq_ret = current_close / df['Close'].iloc[-5] - 1
         soxx_ret = df['SOXX'].iloc[-1] / df['SOXX'].iloc[-5] - 1
         semi_weakness = nq_ret - soxx_ret 
+        
         hyg_high = df['HYG'].max()
         current_hyg = self.get_realtime_price('HYG') or df['HYG'].iloc[-1]
         hyg_drawdown = (current_hyg - hyg_high) / hyg_high * 100
+
         current_vix = self.get_realtime_price('^VIX') or df['VIX'].iloc[-1]
         vix_trend = current_vix - df['VIX'].rolling(window=5).mean().iloc[-1]
         fund_data = self.get_fundamental_data()
 
-        # 점수 산출
         danger_score = 0
         reasons = []
         if daily_chg < -1.5: danger_score += 20; reasons.append(f"📉 추세 하락")
@@ -332,14 +383,12 @@ class DangerAlertBot:
         if fund_data and fund_data['is_recession']: danger_score += 30; reasons.append(f"🛑 샴의 법칙 발동 (침체)")
         danger_score = min(danger_score, 100)
 
-        # 개별 종목 분석
         stock_results = []
         for ticker in TARGET_STOCKS.keys():
             if ticker in dfs:
                 res = self.analyze_individual(ticker, dfs[ticker], df)
                 if res: stock_results.append(res)
 
-        # 메시지 작성
         status_emoji = '🔴 위험' if danger_score >= 60 else '🟡 주의' if danger_score >= 35 else '🟢 안정'
         cloud_str = "하단 이탈 🚨" if current_close < span_a else "구름대 위 ✅"
         spread_str = "정상 ✅" if yield_spread >= 0 else "역전(침체) ⚠️"
