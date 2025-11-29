@@ -1,11 +1,10 @@
 yfinance
 pandas
-pandas_datareader
 numpy
-xgboost
+requests
 ta
 transformers
 torch
 GoogleNews
 newspaper3k
-requests
+pandas-datareader
