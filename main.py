@@ -28,7 +28,7 @@ TARGET_STOCKS = {
 
 class DangerAlertBot:
     def __init__(self):
-        print("🤖 AI 시스템(v29-Link-Clean-Fix) 가동 중...")
+        print("🤖 AI 시스템(v30-SLR-Liquidity-Added) 가동 중...")
         try:
             self.tokenizer = BertTokenizer.from_pretrained('ProsusAI/finbert')
             self.model = BertForSequenceClassification.from_pretrained('ProsusAI/finbert')
@@ -36,17 +36,28 @@ class DangerAlertBot:
         except: pass
         
         self.macro_keywords = [
-            # 1. 핵심 기관
+            # 1. [신규 추가] 금융 규제 & 유동성 (SLR 이슈 대응)
+            'SLR Rule',         # 보완적 레버리지 비율 (핵심)
+            'Bank Capital',     # 은행 자본 규제
+            'Liquidity',        # 시장 유동성
+            'Basel III',        # 바젤3 규제 (은행 관련)
+            'Quantitative Easing', # 양적 완화 (돈 풀기)
+            'Quantitative Tightening', # 양적 긴축 (돈 조이기)
+
+            # 2. 핵심 기관
             'Federal Reserve', 'The Fed', 'US Fed', 'FOMC', 'US Treasury', 'White House Economy',
-            # 2. 핵심 인물
+            
+            # 3. 핵심 인물
             'Jerome Powell', 'Donald Trump', 'Nick Timiraos', 'Scott Bessent',
             'Kevin Warsh', 'Jamie Dimon', 'Bill Ackman', 'Larry Fink', 'Michael Burry',
             'John Williams', 'Christopher Waller',
-            # 3. 경제 지표
+
+            # 4. 경제 지표
             'CPI Inflation', 'PCE Inflation', 'PPI Inflation', 'GDP Growth', 'Recession', 'Stagflation',
-            # 4. 고용 지표
+            
+            # 5. 고용 지표
             'Jobs Report', 'Nonfarm Payrolls', 'Unemployment Rate', 'ADP Report', 'JOLTS',
-            # 5. 시황
+            
             'Bloomberg Markets'
         ]
 
@@ -114,13 +125,10 @@ class DangerAlertBot:
                     try:
                         title = item['title']
                         link = item['link']
-                        
-                        # ★ [수정] 링크 정제 로직 (Broken Link 방지)
-                        # &ved= 뒷부분을 잘라내어 순수 URL만 남김
-                        if '&ved=' in link:
-                            link = link.split('&ved=')[0]
-                        
+                        # 링크 정제
+                        if '&ved=' in link: link = link.split('&ved=')[0]
                         media = item['media']
+                        
                         res = self.nlp(title[:512])[0]
                         score = res['score'] if res['label'] == 'positive' else -res['score'] if res['label'] == 'negative' else 0
                         total_score += score
@@ -140,7 +148,6 @@ class DangerAlertBot:
             macro_tickers = ['NQ=F', 'QQQ', '^VIX', 'DX-Y.NYB', 'SOXX', 'HYG', '^TNX', 'BTC-USD', '^IRX']
             all_tickers = macro_tickers + list(TARGET_STOCKS.keys())
             
-            # 차트용 데이터 (1시간봉)
             data = yf.download(all_tickers, period='5d', interval='1h', progress=False, ignore_tz=True, auto_adjust=True)
 
             if isinstance(data.columns, pd.MultiIndex): 
@@ -265,7 +272,6 @@ class DangerAlertBot:
         elif weekday == 5 and hour >= 9: is_weekend_mode = True
         elif weekday == 0 and hour < 8: is_weekend_mode = True
 
-        # 공통 데이터
         live_btc = self.get_realtime_price('BTC-USD')
         current_btc = live_btc if live_btc else df['BTC'].iloc[-1]
         idx_day = -24 if len(df) >= 24 else 0
