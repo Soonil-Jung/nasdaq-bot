@@ -3,6 +3,7 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 import requests
+import pandas_datareader.data as web # 경제지표 수집용
 from ta.trend import IchimokuIndicator
 from ta.momentum import RSIIndicator
 from transformers import BertTokenizer, BertForSequenceClassification, pipeline
@@ -14,7 +15,6 @@ from datetime import datetime, timedelta
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
 
-# [수정] 요청하신 순서대로 리스트업 (이 순서대로 메시지가 전송됩니다)
 TARGET_STOCKS = {
     'GOOGL': 'Google Alphabet stock',
     'MSFT': 'Microsoft stock',
@@ -28,7 +28,7 @@ TARGET_STOCKS = {
 
 class DangerAlertBot:
     def __init__(self):
-        print("🤖 AI 시스템(Fixed-Order Ver) 가동 중...")
+        print("🤖 AI 시스템(Fundamental-SahmRule Ver) 가동 중...")
         try:
             self.tokenizer = BertTokenizer.from_pretrained('ProsusAI/finbert')
             self.model = BertForSequenceClassification.from_pretrained('ProsusAI/finbert')
@@ -47,25 +47,48 @@ class DangerAlertBot:
         try: requests.post(url, data=data)
         except: pass
 
-    # 실시간 가격 강제 조회 (선물/주식 공용)
-    # [수정된 함수] 모든 종목(선물 포함)의 프리마켓 데이터 강제 수신
+    # ★ [신규] 펀더멘털 데이터 (실업률, CPI) 수집 및 샴의 법칙 계산
+    def get_fundamental_data(self):
+        try:
+            # FRED(연준 데이터)에서 가져옴
+            # UNRATE: 실업률, CPIAUCSL: 소비자물가지수
+            start_date = datetime.now() - timedelta(days=700) # 2년치 데이터
+            
+            # pandas_datareader를 통해 데이터 수집
+            unrate = web.DataReader('UNRATE', 'fred', start_date)
+            cpi = web.DataReader('CPIAUCSL', 'fred', start_date)
+            
+            # 1. 샴의 법칙 (Sahm Rule) 계산
+            # 최근 3개월 실업률 이동평균
+            unrate['MA3'] = unrate['UNRATE'].rolling(window=3).mean()
+            current_ma3 = unrate['MA3'].iloc[-1]
+            
+            # 지난 12개월 중 최저 실업률
+            low_12m = unrate['UNRATE'].iloc[-14:-1].min() # 최근 데이터 제외한 1년치
+            
+            sahm_score = current_ma3 - low_12m
+            is_recession = sahm_score >= 0.50 # 0.5%p 이상이면 침체 시작
+            
+            # 2. CPI (인플레이션) 추세 확인
+            # 전년 동월 대비 상승률 (YoY)
+            cpi_yoy = (cpi['CPIAUCSL'].iloc[-1] - cpi['CPIAUCSL'].iloc[-13]) / cpi['CPIAUCSL'].iloc[-13] * 100
+            
+            return {
+                "unrate": unrate['UNRATE'].iloc[-1],
+                "sahm_score": sahm_score,
+                "is_recession": is_recession,
+                "cpi_yoy": cpi_yoy
+            }
+        except Exception as e:
+            print(f"펀더멘털 데이터 오류: {e}")
+            return None
+
     def get_realtime_price(self, ticker):
         try:
             stock = yf.Ticker(ticker)
-            
-            # 1. 1분봉 데이터 요청
-            # ★ 수정됨: 선물(NQ=F)이든 뭐든 무조건 prepost=True로 설정하여 
-            # 지금 당장 거래되고 있는 가격을 가져오게 변경
             df = stock.history(period='1d', interval='1m', prepost=True)
-            
-            if not df.empty:
-                return df['Close'].iloc[-1]
-            
-            # 2. 실패 시 fast_info 시도 (2차 백업)
-            # 호가 정보가 있으면 그걸 우선 사용
-            if stock.fast_info.get('last_price'):
-                return stock.fast_info.get('last_price')
-                
+            if not df.empty: return df['Close'].iloc[-1]
+            if stock.fast_info.get('last_price'): return stock.fast_info.get('last_price')
         except: pass
         return None
 
@@ -110,7 +133,6 @@ class DangerAlertBot:
         try:
             macro_tickers = ['NQ=F', 'QQQ', '^VIX', 'DX-Y.NYB', 'SOXX', 'HYG', '^TNX', 'BTC-USD', '^IRX']
             all_tickers = macro_tickers + list(TARGET_STOCKS.keys())
-            
             data = yf.download(all_tickers, period='5d', interval='1h', progress=False)
 
             if isinstance(data.columns, pd.MultiIndex): 
@@ -150,7 +172,6 @@ class DangerAlertBot:
     def analyze_individual(self, ticker, df_stock, df_macro):
         if df_stock.empty: return None
 
-        # 실시간 가격 (1분봉 강제 조회)
         live_price = self.get_realtime_price(ticker)
         current_price = live_price if live_price else df_stock['Close'].iloc[-1]
 
@@ -172,7 +193,6 @@ class DangerAlertBot:
 
         qqq_chg = 0
         try:
-            # 매크로 기준도 실시간 반영
             nq_live = self.get_realtime_price('NQ=F')
             if not nq_live: nq_live = df_macro['Close'].iloc[-1]
             qqq_now = nq_live
@@ -226,14 +246,13 @@ class DangerAlertBot:
         if not dfs or 'MACRO' not in dfs: return
         df = dfs['MACRO']
 
-        # --- [PART 1] 매크로 분석 ---
+        # --- [PART 1] 매크로 & 펀더멘털 분석 ---
         df['Vol_MA20'] = df['Volume'].rolling(window=20).mean()
         ichimoku = IchimokuIndicator(high=df['High'], low=df['Low'], window1=9, window2=26, window3=52)
         span_a = ichimoku.ichimoku_a().iloc[-1]
         span_b = ichimoku.ichimoku_b().iloc[-1]
         rsi_val = RSIIndicator(close=df['Close'], window=14).rsi().iloc[-1]
         
-        # ★ [수정] 나스닥 선물도 '실시간 조회 함수' 사용 (멈춤 해결)
         live_price = self.get_realtime_price('NQ=F')
         if live_price:
             current_close = live_price
@@ -247,14 +266,17 @@ class DangerAlertBot:
         current_vol = df['Volume'].iloc[-1]
         vol_ratio = 0 if avg_vol == 0 else current_vol / avg_vol
         
-        current_dxy = df['DXY'].iloc[-1]
+        live_dxy = self.get_realtime_price('DX-Y.NYB')
+        current_dxy = live_dxy if live_dxy else df['DXY'].iloc[-1]
         dxy_chg = (current_dxy - df['DXY'].iloc[-24]) / df['DXY'].iloc[-24] * 100
-        current_tnx = df['TNX'].iloc[-1]
-        current_irx = df['IRX'].iloc[-1]
+        
+        current_tnx = self.get_realtime_price('^TNX') or df['TNX'].iloc[-1]
+        current_irx = self.get_realtime_price('^IRX') or df['IRX'].iloc[-1]
         yield_spread = current_tnx - current_irx
         irx_chg = (current_irx - df['IRX'].iloc[-24]) / df['IRX'].iloc[-24] * 100
         
-        current_btc = df['BTC'].iloc[-1]
+        live_btc = self.get_realtime_price('BTC-USD')
+        current_btc = live_btc if live_btc else df['BTC'].iloc[-1]
         btc_chg = (current_btc - df['BTC'].iloc[-24]) / df['BTC'].iloc[-24] * 100
         
         nq_ret = current_close / df['Close'].iloc[-5] - 1
@@ -262,13 +284,19 @@ class DangerAlertBot:
         semi_weakness = nq_ret - soxx_ret 
         
         hyg_high = df['HYG'].max()
-        current_hyg = df['HYG'].iloc[-1]
+        current_hyg = self.get_realtime_price('HYG') or df['HYG'].iloc[-1]
         hyg_drawdown = (current_hyg - hyg_high) / hyg_high * 100
 
         news_score, worst_title, worst_link, worst_source = self.get_news_sentiment(self.macro_keywords)
-        current_vix = df['VIX'].iloc[-1]
+        
+        live_vix = self.get_realtime_price('^VIX')
+        current_vix = live_vix if live_vix else df['VIX'].iloc[-1]
         vix_trend = current_vix - df['VIX'].rolling(window=5).mean().iloc[-1]
 
+        # ★ 펀더멘털 데이터 가져오기
+        fund_data = self.get_fundamental_data()
+        
+        # 위험 점수 산출
         danger_score = 0
         reasons = []
         if daily_chg < -1.5: danger_score += 20; reasons.append(f"📉 추세 하락")
@@ -281,18 +309,20 @@ class DangerAlertBot:
         if semi_weakness > 0.005: danger_score += 10; reasons.append(f"📉 반도체 약세")
         if hyg_drawdown < -0.3: danger_score += 15; reasons.append(f"💸 스마트머니 이탈")
         if news_score < -0.2: danger_score += 10; reasons.append(f"📰 뉴스 심리 악화")
+        
+        # ★ 펀더멘털 위험 반영 (경기침체 신호)
+        if fund_data and fund_data['is_recession']:
+            danger_score += 30 # 매우 강력한 위험 신호
+            reasons.append(f"🛑 샴의 법칙 발동 (경기침체 신호)")
+
         danger_score = min(danger_score, 100)
 
-        # --- [PART 2] 개별 종목 분석 (순서 고정) ---
+        # --- [PART 2] 개별 종목 분석 ---
         stock_results = []
-        # TARGET_STOCKS 딕셔너리의 키 순서대로 반복
         for ticker in TARGET_STOCKS.keys():
             if ticker in dfs:
                 res = self.analyze_individual(ticker, dfs[ticker], df)
                 if res: stock_results.append(res)
-        
-        # ★ [수정] 위험도순 정렬 코드 제거 (지정된 순서 유지)
-        # stock_results.sort(key=lambda x: x['score'], reverse=True) 
 
         # --- [PART 3] 메시지 작성 ---
         status_emoji = '🔴 위험' if danger_score >= 60 else '🟡 주의' if danger_score >= 35 else '🟢 안정'
@@ -302,32 +332,34 @@ class DangerAlertBot:
         hyg_str = "이탈 ⚠️" if hyg_drawdown < -0.3 else "유입 ✅"
         vix_str = "확산 ↗" if vix_trend > 0 else "안정 ↘"
         
+        # 펀더멘털 문자열
+        fund_str = "데이터 없음"
+        if fund_data:
+            rec_emoji = "🚨 침체 경고" if fund_data['is_recession'] else "안정"
+            fund_str = f"실업률 {fund_data['unrate']}% / CPI {fund_data['cpi_yoy']:.1f}% ({rec_emoji})"
+
         now_kst = datetime.now() + timedelta(hours=9)
         
         msg = f"🔔 *AI 퀀트 시장 정밀 분석*\n"
         msg += f"📅 {now_kst.strftime('%Y-%m-%d %H:%M')} (KST)\n"
         msg += f"🚦 종합상태: {status_emoji} ({danger_score}점)\n\n"
         
-        msg += "*1️⃣ 가격 & 거래량 (Technical)*\n"
-        msg += f"• 나스닥 : {current_close:,.2f} (24h: {daily_chg:+.2f}%)\n"
-        msg += f"• 1시간봉 : {hourly_chg:+.2f}% (단기변동)\n"
-        msg += f"• 거래강도 : 평소의 {int(vol_ratio*100)}%\n"
-        msg += f"• RSI(14) : {rsi_val:.1f}\n"
-        msg += f"• 일목구름 : {cloud_str}\n\n"
-        
-        msg += "*2️⃣ 매크로 지표 (Macro)*\n"
+        msg += "*1️⃣ 매크로 & 펀더멘털 (Macro)*\n"
+        msg += f"• 경제지표 : {fund_str}\n"
         msg += f"• 달러(DXY): {current_dxy:.2f} ({dxy_chg:+.2f}%)\n"
-        msg += f"• 3개월금리 : {current_irx:.2f}% ({irx_chg:+.1f}%)\n"
-        msg += f"• 10년금리 : {current_tnx:.2f}% (시장금리)\n"
+        msg += f"• 금리(10Y/3M): {current_tnx:.2f}% / {current_irx:.2f}%\n"
         msg += f"• 장단기차 : {yield_spread:.2f}p ({spread_str})\n\n"
         
-        msg += "*3️⃣ 리스크 자산 (Risk Asset)*\n"
+        msg += "*2️⃣ 기술적 지표 (Technical)*\n"
+        msg += f"• 나스닥 : {current_close:,.2f} ({daily_chg:+.2f}%)\n"
+        msg += f"• 1시간봉 : {hourly_chg:+.2f}% / 거래 {int(vol_ratio*100)}%\n"
+        msg += f"• 구름대 : {cloud_str} / RSI {rsi_val:.1f}\n\n"
+        
+        msg += "*3️⃣ 리스크 & 심리 (Sentiment)*\n"
         msg += f"• 비트코인 : ${current_btc:,.0f} ({btc_chg:+.2f}%)\n"
         msg += f"• 반도체비 : {semi_str} (괴리 {semi_weakness*100:.1f}%)\n"
-        msg += f"• 하이일드 : {hyg_str} (낙폭 {hyg_drawdown:.2f}%)\n\n"
-        
-        msg += "*4️⃣ 시장 심리 (Sentiment)*\n"
-        msg += f"• 공포(VIX): {current_vix:.2f} (추세: {vix_str})\n"
+        msg += f"• 하이일드 : {hyg_str} (낙폭 {hyg_drawdown:.2f}%)\n"
+        msg += f"• 공포지수 : {current_vix:.2f} (추세: {vix_str})\n"
         msg += f"• 뉴스점수 : {news_score:.2f} ({'악재' if news_score<-0.2 else '중립/호재'})\n"
         if worst_title and news_score < -0.2:
             source_tag = f"[{worst_source}]" if worst_source else "[News]"
@@ -340,7 +372,7 @@ class DangerAlertBot:
             msg += "✅ 특이사항 없음 (안정적)"
 
         msg += "\n\n───────────────\n"
-        msg += "*📊 개별 종목 분석 (지정 순서)*\n"
+        msg += "*📊 종목별 위험도 (현재가/등락률)*\n"
         
         for item in stock_results:
             icon = "🔴" if item['score'] >= 60 else "🟡" if item['score'] >= 30 else "🟢"
