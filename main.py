@@ -34,22 +34,21 @@ class DangerAlertBot:
             self.model = BertForSequenceClassification.from_pretrained('ProsusAI/finbert')
             self.nlp = pipeline("sentiment-analysis", model=self.model, tokenizer=self.tokenizer)
         except: pass
-        
-        self.macro_keywords = [
-            # 1. [신규 추가] 금융 규제 & 유동성 (SLR 이슈 대응)
-            'SLR Rule',         # 보완적 레버리지 비율 (핵심)
-            'Bank Capital',     # 은행 자본 규제
-            'Liquidity',        # 시장 유동성
-            'Basel III',        # 바젤3 규제 (은행 관련)
-            'Quantitative Easing', # 양적 완화 (돈 풀기)
-            'Quantitative Tightening', # 양적 긴축 (돈 조이기)
 
-            # 2. 핵심 기관
+        self.macro_keywords = [
+            # 1. 금융 규제 & 유동성 (SLR 이슈)
+            'SLR Rule', 'Bank Capital', 'Liquidity', 'Basel III', 
+            'Quantitative Easing', 'Quantitative Tightening',
+
+            # 2. 핵심 기관 & IB (투자은행 복구 완료)
             'Federal Reserve', 'The Fed', 'US Fed', 'FOMC', 'US Treasury', 'White House Economy',
-            
-            # 3. 핵심 인물
+            'Goldman Sachs',    # ★ [복구] 골드만삭스
+            'Morgan Stanley',   # ★ [복구] 모건스탠리 (마이크 윌슨 등)
+            'JP Morgan',        # 제이미 다이먼
+
+            # 3. 핵심 인물 (빅마우스)
             'Jerome Powell', 'Donald Trump', 'Nick Timiraos', 'Scott Bessent',
-            'Kevin Warsh', 'Jamie Dimon', 'Bill Ackman', 'Larry Fink', 'Michael Burry',
+            'Kevin Warsh', 'Bill Ackman', 'Larry Fink', 'Michael Burry',
             'John Williams', 'Christopher Waller',
 
             # 4. 경제 지표
@@ -60,6 +59,7 @@ class DangerAlertBot:
             
             'Bloomberg Markets'
         ]
+        
 
     def send_telegram(self, message):
         if not TELEGRAM_TOKEN: return
