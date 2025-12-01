@@ -28,7 +28,7 @@ TARGET_STOCKS = {
 
 class DangerAlertBot:
     def __init__(self):
-        print("🤖 AI 시스템(v32-Cloud-Detail) 가동 중...")
+        print("🤖 AI 시스템(v34-Ichimoku-Shift-Fix) 가동 중...")
         try:
             self.tokenizer = BertTokenizer.from_pretrained('ProsusAI/finbert')
             self.model = BertForSequenceClassification.from_pretrained('ProsusAI/finbert')
@@ -63,6 +63,17 @@ class DangerAlertBot:
         except: pass
         return None
 
+    # 실시간 차트 데이터 (구름대 계산용)
+    def get_realtime_chart(self, ticker):
+        try:
+            # 26개 전 데이터를 봐야 하므로 기간을 넉넉히 5일 이상 잡음
+            df = yf.download(ticker, period='10d', interval='1h', prepost=True, progress=False, ignore_tz=True)
+            if df.empty: return None
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
+            return df
+        except: return None
+
     def get_fundamental_data(self):
         try:
             start_date = datetime.now() - timedelta(days=700)
@@ -74,17 +85,11 @@ class DangerAlertBot:
             unrate['MA3'] = unrate['UNRATE'].rolling(window=3).mean()
             current_ma3 = unrate['MA3'].iloc[-1]
             low_12m = unrate['UNRATE'].iloc[-14:-1].min()
-            
             sahm_score = current_ma3 - low_12m
             is_recession = sahm_score >= 0.50
             cpi_yoy = (cpi['CPIAUCSL'].iloc[-1] - cpi['CPIAUCSL'].iloc[-13]) / cpi['CPIAUCSL'].iloc[-13] * 100
             
-            return {
-                "unrate": unrate['UNRATE'].iloc[-1],
-                "sahm_score": sahm_score,
-                "is_recession": is_recession,
-                "cpi_yoy": cpi_yoy
-            }
+            return {"unrate": unrate['UNRATE'].iloc[-1], "sahm_score": sahm_score, "is_recession": is_recession, "cpi_yoy": cpi_yoy}
         except: return None
 
     def get_news_sentiment(self, target_keywords):
@@ -130,8 +135,8 @@ class DangerAlertBot:
             macro_tickers = ['NQ=F', 'QQQ', '^VIX', 'DX-Y.NYB', 'SOXX', 'HYG', '^TNX', 'BTC-USD', '^IRX']
             all_tickers = macro_tickers + list(TARGET_STOCKS.keys())
             
-            # 차트 분석용 1시간봉 (지표 계산)
-            data = yf.download(all_tickers, period='5d', interval='1h', progress=False, ignore_tz=True, auto_adjust=True)
+            # period='10d'로 늘림 (일목균형표 26개 전 데이터 확보 위해)
+            data = yf.download(all_tickers, period='10d', interval='1h', prepost=True, progress=False, ignore_tz=True, auto_adjust=True)
 
             if isinstance(data.columns, pd.MultiIndex): 
                 dfs = {}
@@ -166,7 +171,7 @@ class DangerAlertBot:
         except: return {}
 
     def analyze_individual(self, ticker, df_stock, df_macro):
-        if df_stock.empty or len(df_stock) < 10: return None
+        if df_stock.empty or len(df_stock) < 30: return None # 30개 이상이어야 26일 전 데이터 확인 가능
 
         live_price = self.get_realtime_price(ticker)
         current_price = live_price if live_price else df_stock['Close'].iloc[-1]
@@ -180,10 +185,14 @@ class DangerAlertBot:
         else: daily_pct = (current_price - prev_close) / prev_close * 100
 
         ichimoku = IchimokuIndicator(high=df_stock['High'], low=df_stock['Low'], window1=9, window2=26, window3=52)
-        span_a = ichimoku.ichimoku_a().iloc[-1]
-        span_b = ichimoku.ichimoku_b().iloc[-1]
-        rsi_val = RSIIndicator(close=df_stock['Close'], window=14).rsi().iloc[-1]
         
+        # ★ [핵심 수정] 26개 전(Shift된) 구름대 값을 가져옴
+        span_a = ichimoku.ichimoku_a().iloc[-26]
+        span_b = ichimoku.ichimoku_b().iloc[-26]
+        
+        cloud_bottom = min(span_a, span_b)
+        
+        rsi_val = RSIIndicator(close=df_stock['Close'], window=14).rsi().iloc[-1]
         df_stock['Vol_MA20'] = df_stock['Volume'].rolling(window=20).mean()
         vol_ratio = 0
         if df_stock['Vol_MA20'].iloc[-1] > 0:
@@ -215,13 +224,9 @@ class DangerAlertBot:
         if relative_strength < -1.5: 
             danger_score += 15
             reasons.append(f"상대적 약세")
-        
-        # [수정] 개별 종목 구름대 로직 (단순화: 뚫리면 위험)
-        cloud_bottom = min(span_a, span_b)
         if current_price < cloud_bottom:
             danger_score += 20
             reasons.append("☁️ 구름대 이탈")
-            
         if rsi_val < 30:
             danger_score += 10
             reasons.append(f"과매도({rsi_val:.0f})")
@@ -247,9 +252,9 @@ class DangerAlertBot:
 
     def analyze_danger(self):
         dfs = self.get_market_data()
-        if not dfs or 'MACRO' not in dfs: return
+        if not dfs or 'MACRO' not in dfs or dfs['MACRO'].empty: return
         df = dfs['MACRO']
-        if len(df) < 20: return
+        if len(df) < 30: return # 데이터 개수 체크
 
         # 주말 확인
         now_kst = datetime.now() + timedelta(hours=9)
@@ -286,20 +291,34 @@ class DangerAlertBot:
             return
 
         # [평일 모드]
-        df['Vol_MA20'] = df['Volume'].rolling(window=20).mean()
-        ichimoku = IchimokuIndicator(high=df['High'], low=df['Low'], window1=9, window2=26, window3=52)
-        span_a = ichimoku.ichimoku_a().iloc[-1]
-        span_b = ichimoku.ichimoku_b().iloc[-1]
         
-        # ★ [구름대 세분화 로직]
+        # ★ [핵심 수정] 나스닥 실시간 차트 (10일치 확보)
+        nq_chart = self.get_realtime_chart('NQ=F')
+        
+        if nq_chart is not None and not nq_chart.empty and len(nq_chart) > 30:
+            ichimoku = IchimokuIndicator(high=nq_chart['High'], low=nq_chart['Low'], window1=9, window2=26, window3=52)
+            # ★ 26개 전의 구름대 값 사용 (Time Shift 보정)
+            span_a = ichimoku.ichimoku_a().iloc[-26]
+            span_b = ichimoku.ichimoku_b().iloc[-26]
+            current_close = nq_chart['Close'].iloc[-1] # 차트 마지막 값
+            
+            # 실시간 호가가 있으면 그걸로 덮어쓰기 (더 정확)
+            live_price = self.get_realtime_price('NQ=F')
+            if live_price: current_close = live_price
+        else:
+            # 실패 시 기존 방식 (단, 여기도 인덱스는 -26으로 수정)
+            ichimoku = IchimokuIndicator(high=df['High'], low=df['Low'], window1=9, window2=26, window3=52)
+            span_a = ichimoku.ichimoku_a().iloc[-26]
+            span_b = ichimoku.ichimoku_b().iloc[-26]
+            current_close = self.get_realtime_price('NQ=F') or df['Close'].iloc[-1]
+
         cloud_top = max(span_a, span_b)
         cloud_bottom = min(span_a, span_b)
         cloud_height = cloud_top - cloud_bottom
         
+        df['Vol_MA20'] = df['Volume'].rolling(window=20).mean()
         rsi_val = RSIIndicator(close=df['Close'], window=14).rsi().iloc[-1]
         
-        live_price = self.get_realtime_price('NQ=F')
-        current_close = live_price if live_price else df['Close'].iloc[-1]
         idx_hour = -2 if len(df) >= 2 else 0
         daily_chg = (current_close - df['Close'].iloc[idx_day]) / df['Close'].iloc[idx_day] * 100 
         hourly_chg = (current_close - df['Close'].iloc[idx_hour]) / df['Close'].iloc[idx_hour] * 100
@@ -333,8 +352,8 @@ class DangerAlertBot:
         if daily_chg < -1.5: danger_score += 20; reasons.append(f"📉 추세 하락")
         if hourly_chg < -0.8: danger_score += 15; reasons.append(f"⚡ 투매 발생")
         
-        # ★ [구름대 점수 반영]
-        cloud_status_text = "구름대 위 (안정) ✅"
+        # [수정] 구름대 판정 (동기화됨)
+        cloud_status_text = "구름대 위 ✅"
         if current_close < cloud_bottom:
             danger_score += 25
             reasons.append("☁️ 구름대 하단 완전 이탈")
