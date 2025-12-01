@@ -28,38 +28,22 @@ TARGET_STOCKS = {
 
 class DangerAlertBot:
     def __init__(self):
-        print("🤖 AI 시스템(v30-SLR-Liquidity-Added) 가동 중...")
+        print("🤖 AI 시스템(v32-Cloud-Detail) 가동 중...")
         try:
             self.tokenizer = BertTokenizer.from_pretrained('ProsusAI/finbert')
             self.model = BertForSequenceClassification.from_pretrained('ProsusAI/finbert')
             self.nlp = pipeline("sentiment-analysis", model=self.model, tokenizer=self.tokenizer)
         except: pass
-
+        
         self.macro_keywords = [
-            # 1. 금융 규제 & 유동성 (SLR 이슈)
-            'SLR Rule', 'Bank Capital', 'Liquidity', 'Basel III', 
-            'Quantitative Easing', 'Quantitative Tightening',
-
-            # 2. 핵심 기관 & IB (투자은행 복구 완료)
             'Federal Reserve', 'The Fed', 'US Fed', 'FOMC', 'US Treasury', 'White House Economy',
-            'Goldman Sachs',    # ★ [복구] 골드만삭스
-            'Morgan Stanley',   # ★ [복구] 모건스탠리 (마이크 윌슨 등)
-            'JP Morgan',        # 제이미 다이먼
-
-            # 3. 핵심 인물 (빅마우스)
             'Jerome Powell', 'Donald Trump', 'Nick Timiraos', 'Scott Bessent',
-            'Kevin Warsh', 'Bill Ackman', 'Larry Fink', 'Michael Burry',
+            'Kevin Warsh', 'Jamie Dimon', 'Bill Ackman', 'Larry Fink', 'Michael Burry',
             'John Williams', 'Christopher Waller',
-
-            # 4. 경제 지표
             'CPI Inflation', 'PCE Inflation', 'PPI Inflation', 'GDP Growth', 'Recession', 'Stagflation',
-            
-            # 5. 고용 지표
             'Jobs Report', 'Nonfarm Payrolls', 'Unemployment Rate', 'ADP Report', 'JOLTS',
-            
             'Bloomberg Markets'
         ]
-        
 
     def send_telegram(self, message):
         if not TELEGRAM_TOKEN: return
@@ -71,7 +55,7 @@ class DangerAlertBot:
     def get_realtime_price(self, ticker):
         try:
             stock = yf.Ticker(ticker)
-            df = stock.history(period='1d', interval='1m', prepost=True)
+            df = stock.history(period='1d', interval='1m', prepost=True, auto_adjust=True)
             if not df.empty:
                 return df['Close'].iloc[-1]
             if stock.fast_info.get('last_price'):
@@ -125,10 +109,8 @@ class DangerAlertBot:
                     try:
                         title = item['title']
                         link = item['link']
-                        # 링크 정제
                         if '&ved=' in link: link = link.split('&ved=')[0]
                         media = item['media']
-                        
                         res = self.nlp(title[:512])[0]
                         score = res['score'] if res['label'] == 'positive' else -res['score'] if res['label'] == 'negative' else 0
                         total_score += score
@@ -148,6 +130,7 @@ class DangerAlertBot:
             macro_tickers = ['NQ=F', 'QQQ', '^VIX', 'DX-Y.NYB', 'SOXX', 'HYG', '^TNX', 'BTC-USD', '^IRX']
             all_tickers = macro_tickers + list(TARGET_STOCKS.keys())
             
+            # 차트 분석용 1시간봉 (지표 계산)
             data = yf.download(all_tickers, period='5d', interval='1h', progress=False, ignore_tz=True, auto_adjust=True)
 
             if isinstance(data.columns, pd.MultiIndex): 
@@ -198,6 +181,7 @@ class DangerAlertBot:
 
         ichimoku = IchimokuIndicator(high=df_stock['High'], low=df_stock['Low'], window1=9, window2=26, window3=52)
         span_a = ichimoku.ichimoku_a().iloc[-1]
+        span_b = ichimoku.ichimoku_b().iloc[-1]
         rsi_val = RSIIndicator(close=df_stock['Close'], window=14).rsi().iloc[-1]
         
         df_stock['Vol_MA20'] = df_stock['Volume'].rolling(window=20).mean()
@@ -231,9 +215,13 @@ class DangerAlertBot:
         if relative_strength < -1.5: 
             danger_score += 15
             reasons.append(f"상대적 약세")
-        if current_price < span_a:
+        
+        # [수정] 개별 종목 구름대 로직 (단순화: 뚫리면 위험)
+        cloud_bottom = min(span_a, span_b)
+        if current_price < cloud_bottom:
             danger_score += 20
             reasons.append("☁️ 구름대 이탈")
+            
         if rsi_val < 30:
             danger_score += 10
             reasons.append(f"과매도({rsi_val:.0f})")
@@ -259,7 +247,7 @@ class DangerAlertBot:
 
     def analyze_danger(self):
         dfs = self.get_market_data()
-        if not dfs or 'MACRO' not in dfs or dfs['MACRO'].empty: return
+        if not dfs or 'MACRO' not in dfs: return
         df = dfs['MACRO']
         if len(df) < 20: return
 
@@ -282,7 +270,6 @@ class DangerAlertBot:
         if is_weekend_mode:
             btc_emoji = "🔥 급등" if btc_chg > 3 else "📉 급락" if btc_chg < -3 else "➡️ 횡보"
             news_emoji = "😊 호재/중립" if news_score >= -0.2 else "🚨 악재 우세"
-            
             msg = f"☕ *주말 시장 핵심 브리핑*\n"
             msg += f"📅 {now_kst.strftime('%Y-%m-%d %H:%M')} (KST)\n\n"
             msg += f"*1️⃣ 비트코인 (24h Live)*\n"
@@ -303,6 +290,12 @@ class DangerAlertBot:
         ichimoku = IchimokuIndicator(high=df['High'], low=df['Low'], window1=9, window2=26, window3=52)
         span_a = ichimoku.ichimoku_a().iloc[-1]
         span_b = ichimoku.ichimoku_b().iloc[-1]
+        
+        # ★ [구름대 세분화 로직]
+        cloud_top = max(span_a, span_b)
+        cloud_bottom = min(span_a, span_b)
+        cloud_height = cloud_top - cloud_bottom
+        
         rsi_val = RSIIndicator(close=df['Close'], window=14).rsi().iloc[-1]
         
         live_price = self.get_realtime_price('NQ=F')
@@ -339,7 +332,27 @@ class DangerAlertBot:
         reasons = []
         if daily_chg < -1.5: danger_score += 20; reasons.append(f"📉 추세 하락")
         if hourly_chg < -0.8: danger_score += 15; reasons.append(f"⚡ 투매 발생")
-        if current_close < span_a: danger_score += 20; reasons.append("☁️ 구름대 이탈")
+        
+        # ★ [구름대 점수 반영]
+        cloud_status_text = "구름대 위 (안정) ✅"
+        if current_close < cloud_bottom:
+            danger_score += 25
+            reasons.append("☁️ 구름대 하단 완전 이탈")
+            cloud_status_text = "하단 이탈 (매도) 🚨"
+        elif current_close > cloud_top:
+            cloud_status_text = "구름대 위 (안정) ✅"
+        else: # 구름대 내부
+            if cloud_height > 0:
+                pos = (current_close - cloud_bottom) / cloud_height
+                if pos < 0.33: # 하단
+                    danger_score += 10
+                    reasons.append("☁️ 구름대 하단 위협")
+                    cloud_status_text = "구름대 하단 (불안) ⚡"
+                elif pos > 0.66: # 상단
+                    cloud_status_text = "구름대 상단 (조정) 🌤️"
+                else: # 중단
+                    cloud_status_text = "구름대 중앙 (혼조) 🌫"
+            
         if vol_ratio > 1.5: danger_score += 15; reasons.append(f"📢 거래량 폭증")
         if dxy_chg > 0.3: danger_score += 10; reasons.append(f"💵 달러 강세")
         if irx_chg > 2.0: danger_score += 10; reasons.append(f"🏦 단기금리 급등")
@@ -357,7 +370,6 @@ class DangerAlertBot:
                 if res: stock_results.append(res)
 
         status_emoji = '🔴 위험' if danger_score >= 60 else '🟡 주의' if danger_score >= 35 else '🟢 안정'
-        cloud_str = "하단 이탈 🚨" if current_close < span_a else "구름대 위 ✅"
         spread_str = "정상 ✅" if yield_spread >= 0 else "역전(침체) ⚠️"
         semi_str = "약세 ⚠️" if semi_weakness > 0.005 else "양호 ✅"
         hyg_str = "이탈 ⚠️" if hyg_drawdown < -0.3 else "유입 ✅"
@@ -381,7 +393,7 @@ class DangerAlertBot:
         msg += "*2️⃣ 기술적 지표 (Technical)*\n"
         msg += f"• 나스닥 : {current_close:,.2f} ({daily_chg:+.2f}%)\n"
         msg += f"• 1시간봉 : {hourly_chg:+.2f}% / 거래 {int(vol_ratio*100)}%\n"
-        msg += f"• 구름대 : {cloud_str} / RSI {rsi_val:.1f}\n\n"
+        msg += f"• 구름대 : {cloud_status_text} / RSI {rsi_val:.1f}\n\n"
         
         msg += "*3️⃣ 리스크 & 심리 (Sentiment)*\n"
         msg += f"• 비트코인 : ${current_btc:,.0f} ({btc_chg:+.2f}%)\n"
