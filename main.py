@@ -25,11 +25,19 @@ TARGET_STOCKS = {
     'PLTR': 'Palantir stock',
     'AAPL': 'Apple stock'
 }
+
+# ★ [최적화된 파라미터 적용]
+W_TREND = 30   # 추세 가중치 (구름대, 이평선, 일간하락)
+W_VOL = 15     # 변동성 가중치 (거래량, 1시간급락, 뉴스, RSI)
+W_MACRO = 10   # 매크로 가중치 (달러, 금리, 비트코인, 하이일드)
+
+TH_SELL = 80   # 매도(위험) 기준점
+TH_BUY = 40    # 매수(안정) 기준점
 # ======================================================
 
 class DangerAlertBot:
     def __init__(self):
-        print("🤖 AI 시스템(v40-Trend-Visual) 가동 중...")
+        print("🤖 AI 시스템(v42-Optimized) 가동 중...")
         try:
             self.tokenizer = BertTokenizer.from_pretrained('ProsusAI/finbert')
             self.model = BertForSequenceClassification.from_pretrained('ProsusAI/finbert')
@@ -56,6 +64,7 @@ class DangerAlertBot:
     def get_realtime_price(self, ticker):
         try:
             stock = yf.Ticker(ticker)
+            # 프리마켓 데이터 강제 수신 (NQ=F 포함 모두)
             df = stock.history(period='1d', interval='1m', prepost=True, auto_adjust=True)
             if not df.empty: return df['Close'].iloc[-1]
             if stock.fast_info.get('last_price'): return stock.fast_info.get('last_price')
@@ -81,11 +90,9 @@ class DangerAlertBot:
             unrate['MA3'] = unrate['UNRATE'].rolling(window=3).mean()
             current_ma3 = unrate['MA3'].iloc[-1]
             low_12m = unrate['UNRATE'].iloc[-14:-1].min()
-            
             sahm_score = current_ma3 - low_12m
             is_recession = sahm_score >= 0.50
             cpi_yoy = (cpi['CPIAUCSL'].iloc[-1] - cpi['CPIAUCSL'].iloc[-13]) / cpi['CPIAUCSL'].iloc[-13] * 100
-            
             return {"unrate": unrate['UNRATE'].iloc[-1], "sahm_score": sahm_score, "is_recession": is_recession, "cpi_yoy": cpi_yoy}
         except: return None
 
@@ -106,21 +113,21 @@ class DangerAlertBot:
                 googlenews.search(key)
                 results = googlenews.results(sort=True)
                 if not results: continue
-                
-                for item in results[:2]:
+                # 분석 범위 확대 (상위 5개)
+                for item in results[:5]:
                     try:
                         title = item['title']
                         link = item['link']
                         if '&ved=' in link: link = link.split('&ved=')[0]
                         media = item['media']
-                        title = re.sub(r'[\[\]\*\_]', '', title)
-                        res = self.nlp(title[:512])[0]
+                        title_clean = re.sub(r'[\[\]\*\_]', '', title)
+                        res = self.nlp(title_clean[:512])[0]
                         score = res['score'] if res['label'] == 'positive' else -res['score'] if res['label'] == 'negative' else 0
                         total_score += score
                         count += 1
                         if score < min_score and score < -0.5:
                             min_score = score
-                            worst_title = title
+                            worst_title = title_clean
                             worst_link = link
                             worst_source = media
                     except: continue
@@ -132,28 +139,20 @@ class DangerAlertBot:
         try:
             macro_tickers = ['NQ=F', 'QQQ', '^VIX', 'DX-Y.NYB', 'SOXX', 'HYG', '^TNX', 'BTC-USD', '^IRX']
             all_tickers = macro_tickers + list(TARGET_STOCKS.keys())
-            
             data = yf.download(all_tickers, period='1mo', interval='1h', prepost=True, progress=False, ignore_tz=True, auto_adjust=True)
-
             if isinstance(data.columns, pd.MultiIndex): 
                 dfs = {}
                 df_macro = pd.DataFrame()
-                
                 if 'Close' not in data.columns or 'NQ=F' not in data['Close'].columns: return {}
-
                 df_macro['Close'] = data['Close']['NQ=F']
                 df_macro['High'] = data['High']['NQ=F']
                 df_macro['Low'] = data['Low']['NQ=F']
                 df_macro['Volume'] = data['Volume']['QQQ']
-                
                 for ticker, col in {'^VIX':'VIX', 'DX-Y.NYB':'DXY', 'SOXX':'SOXX', 'HYG':'HYG', '^TNX':'TNX', '^IRX':'IRX', 'BTC-USD':'BTC'}.items():
-                    if ticker in data['Close'].columns:
-                        df_macro[col] = data['Close'][ticker]
+                    if ticker in data['Close'].columns: df_macro[col] = data['Close'][ticker]
                     else: df_macro[col] = np.nan
-
                 df_macro = df_macro.ffill().bfill().dropna()
                 dfs['MACRO'] = df_macro
-
                 for ticker in TARGET_STOCKS.keys():
                     if ticker in data['Close'].columns:
                         df_stock = pd.DataFrame()
@@ -177,7 +176,6 @@ class DangerAlertBot:
             prev_close = yf.Ticker(ticker).info.get('previousClose')
             if not prev_close: prev_close = df_stock['Close'].iloc[-8]
         except: prev_close = df_stock['Close'].iloc[-8]
-
         if prev_close == 0: daily_pct = 0
         else: daily_pct = (current_price - prev_close) / prev_close * 100
 
@@ -191,17 +189,9 @@ class DangerAlertBot:
         ma50 = SMAIndicator(close=df_stock['Close'], window=50).sma_indicator().iloc[-1]
         ma120 = SMAIndicator(close=df_stock['Close'], window=120).sma_indicator().iloc[-1]
         
-        sma20_prev = SMAIndicator(close=df_stock['Close'], window=20).sma_indicator().iloc[-2]
-        sma50_prev = SMAIndicator(close=df_stock['Close'], window=50).sma_indicator().iloc[-2]
-        slope20_down = ma20 < sma20_prev
-        slope50_down = ma50 < sma50_prev
-
         rsi_val = RSIIndicator(close=df_stock['Close'], window=14).rsi().iloc[-1]
-        
         df_stock['Vol_MA20'] = df_stock['Volume'].rolling(window=20).mean()
-        vol_ratio = 0
-        if df_stock['Vol_MA20'].iloc[-1] > 0:
-            vol_ratio = df_stock['Volume'].iloc[-1] / df_stock['Vol_MA20'].iloc[-1]
+        vol_ratio = 0 if df_stock['Vol_MA20'].iloc[-1] == 0 else df_stock['Volume'].iloc[-1] / df_stock['Vol_MA20'].iloc[-1]
 
         qqq_chg = 0
         try:
@@ -210,8 +200,7 @@ class DangerAlertBot:
             qqq_now = nq_live
             idx = -24 if len(df_macro) >= 24 else 0
             qqq_prev = df_macro['Close'].iloc[idx] 
-            if qqq_prev != 0:
-                qqq_chg = (qqq_now - qqq_prev) / qqq_prev * 100
+            if qqq_prev != 0: qqq_chg = (qqq_now - qqq_prev) / qqq_prev * 100
         except: pass
         relative_strength = daily_pct - qqq_chg
 
@@ -223,50 +212,28 @@ class DangerAlertBot:
         high_beta = ['TSLA', 'NVDA', 'AMD', 'PLTR']
         drop_threshold = -3.5 if ticker in high_beta else -2.0
 
-        if daily_pct < drop_threshold:
-            danger_score += 30
-            reasons.append(f"📉 폭락")
-        if relative_strength < -1.5: 
-            danger_score += 15
-            reasons.append(f"상대적 약세")
-        if current_price < cloud_bottom:
-            danger_score += 20
-            reasons.append("☁️ 구름대 이탈")
+        # ★ [최적화 가중치 적용: 개별 종목]
+        if daily_pct < drop_threshold: danger_score += W_TREND; reasons.append(f"📉 폭락")
+        if relative_strength < -1.5: danger_score += W_VOL; reasons.append(f"상대적 약세")
+        if current_price < cloud_bottom: danger_score += W_TREND; reasons.append("☁️ 구름대 이탈")
         
-        if ma20 > 0 and ma50 > 0 and ma120 > 0:
-            if current_price < ma20 < ma50 < ma120:
-                if slope20_down and slope50_down:
-                    danger_score += 25
-                    reasons.append("📉 역배열(하락가속)")
-                else:
-                    danger_score += 20
-                    reasons.append("📉 역배열(완만)")
-            elif ma20 < ma50 and current_price < ma20:
-                danger_score += 10
-                reasons.append("📉 데드크로스")
+        if current_price < ma20 < ma50 < ma120:
+            danger_score += W_TREND; reasons.append("📉 역배열")
+        elif ma20 < ma50 and current_price < ma20:
+            danger_score += int(W_TREND/2); reasons.append("📉 데드크로스")
 
-        if rsi_val < 30:
-            danger_score += 10
-            reasons.append(f"과매도({rsi_val:.0f})")
-        if vol_ratio > 2.0:
-            danger_score += 15
-            reasons.append(f"거래량폭발")
+        if rsi_val < 30: danger_score += W_VOL; reasons.append(f"과매도({rsi_val:.0f})")
+        if vol_ratio > 2.0: danger_score += W_VOL; reasons.append(f"거래량폭발")
+        
         if news_score < -0.3:
-            danger_score += 20
+            danger_score += W_VOL
             if worst_news and worst_link:
                 clean_title = worst_news[:25] + "..." if len(worst_news) > 25 else worst_news
                 source_tag = f"[{worst_source}]" if worst_source else "[News]"
                 reasons.append(f"📰 {source_tag} [{clean_title}]({worst_link})")
-            else:
-                reasons.append(f"📰 악재 뉴스")
+            else: reasons.append(f"📰 악재 뉴스")
 
-        return {
-            "ticker": ticker,
-            "price": current_price,
-            "change": daily_pct,
-            "score": min(danger_score, 100),
-            "reasons": reasons
-        }
+        return {"ticker": ticker, "price": current_price, "change": daily_pct, "score": min(danger_score, 100), "reasons": reasons}
 
     def analyze_danger(self):
         dfs = self.get_market_data()
@@ -291,19 +258,12 @@ class DangerAlertBot:
         if is_weekend_mode:
             btc_emoji = "🔥 급등" if btc_chg > 3 else "📉 급락" if btc_chg < -3 else "➡️ 횡보"
             news_emoji = "😊 호재/중립" if news_score >= -0.2 else "🚨 악재 우세"
-            msg = f"☕ *주말 시장 핵심 브리핑*\n"
-            msg += f"📅 {now_kst.strftime('%Y-%m-%d %H:%M')} (KST)\n\n"
-            msg += f"*1️⃣ 비트코인 (24h Live)*\n"
-            msg += f"• 가격 : ${current_btc:,.0f} ({btc_chg:+.2f}%)\n"
-            msg += f"• 추세 : {btc_emoji}\n\n"
-            msg += f"*2️⃣ 주말 주요 뉴스*\n"
-            msg += f"• 심리점수 : {news_score:.2f} ({news_emoji})\n"
+            msg = f"☕ *주말 시장 핵심 브리핑*\n📅 {now_kst.strftime('%Y-%m-%d %H:%M')} (KST)\n\n*1️⃣ 비트코인 (24h Live)*\n• 가격 : ${current_btc:,.0f} ({btc_chg:+.2f}%)\n• 추세 : {btc_emoji}\n\n*2️⃣ 주말 주요 뉴스*\n• 심리점수 : {news_score:.2f} ({news_emoji})\n"
             if worst_title and news_score < -0.2:
                 clean_title = re.sub(r'[\[\]\*\_]', '', worst_title)
                 source_tag = f"[{worst_source}]" if worst_source else "[News]"
                 msg += f"  └ 🗞 {source_tag} [{clean_title[:30]}...]({worst_link})\n"
-            elif news_score >= -0.2:
-                msg += "  └ 특이사항 없는 평온한 주말입니다.\n"
+            elif news_score >= -0.2: msg += "  └ 특이사항 없는 평온한 주말입니다.\n"
             self.send_telegram(msg)
             return
 
@@ -319,14 +279,8 @@ class DangerAlertBot:
             sma50 = SMAIndicator(close=nq_chart['Close'], window=50).sma_indicator()
             sma120 = SMAIndicator(close=nq_chart['Close'], window=120).sma_indicator()
             
-            ma20 = sma20.iloc[-1]
-            ma50 = sma50.iloc[-1]
-            ma120 = sma120.iloc[-1]
-            
-            ma20_prev = sma20.iloc[-2]
-            ma50_prev = sma50.iloc[-2]
-            ma120_prev = sma120.iloc[-2]
-            
+            ma20 = sma20.iloc[-1]; ma50 = sma50.iloc[-1]; ma120 = sma120.iloc[-1]
+            ma20_prev = sma20.iloc[-2]; ma50_prev = sma50.iloc[-2]
             slope20_down = ma20 < ma20_prev
             slope50_down = ma50 < ma50_prev
             
@@ -337,23 +291,10 @@ class DangerAlertBot:
             ichimoku = IchimokuIndicator(high=df['High'], low=df['Low'], window1=9, window2=26, window3=52)
             span_a = ichimoku.ichimoku_a().iloc[-26]
             span_b = ichimoku.ichimoku_b().iloc[-26]
-            
-            try:
-                sma20 = SMAIndicator(close=df['Close'], window=20).sma_indicator()
-                sma50 = SMAIndicator(close=df['Close'], window=50).sma_indicator()
-                sma120 = SMAIndicator(close=df['Close'], window=120).sma_indicator()
-                ma20 = sma20.iloc[-1]
-                ma50 = sma50.iloc[-1]
-                ma120 = sma120.iloc[-1]
-                ma20_prev = sma20.iloc[-2]
-                ma50_prev = sma50.iloc[-2]
-                ma120_prev = sma120.iloc[-2]
-                slope20_down, slope50_down = False, False
-            except:
-                ma20, ma50, ma120 = 0, 0, 0
-                slope20_down, slope50_down = False, False
-                ma20_prev, ma50_prev, ma120_prev = 0, 0, 0
-            
+            ma20 = SMAIndicator(close=df['Close'], window=20).sma_indicator().iloc[-1]
+            ma50 = SMAIndicator(close=df['Close'], window=50).sma_indicator().iloc[-1]
+            ma120 = SMAIndicator(close=df['Close'], window=120).sma_indicator().iloc[-1]
+            ma20_prev = ma20; ma50_prev = ma50; slope20_down = False; slope50_down = False
             current_close = self.get_realtime_price('NQ=F') or df['Close'].iloc[-1]
 
         cloud_top = max(span_a, span_b)
@@ -373,7 +314,6 @@ class DangerAlertBot:
         
         current_dxy = self.get_realtime_price('DX-Y.NYB') or df['DXY'].iloc[-1]
         dxy_chg = (current_dxy - df['DXY'].iloc[idx_day]) / df['DXY'].iloc[idx_day] * 100
-        
         current_tnx = self.get_realtime_price('^TNX') or df['TNX'].iloc[-1]
         current_irx = self.get_realtime_price('^IRX') or df['IRX'].iloc[-1]
         yield_spread = current_tnx - current_irx
@@ -382,7 +322,6 @@ class DangerAlertBot:
         nq_ret = current_close / df['Close'].iloc[-5] - 1
         soxx_ret = df['SOXX'].iloc[-1] / df['SOXX'].iloc[-5] - 1
         semi_weakness = nq_ret - soxx_ret 
-        
         hyg_high = df['HYG'].max()
         current_hyg = self.get_realtime_price('HYG') or df['HYG'].iloc[-1]
         hyg_drawdown = (current_hyg - hyg_high) / hyg_high * 100
@@ -391,23 +330,25 @@ class DangerAlertBot:
         vix_trend = current_vix - df['VIX'].rolling(window=5).mean().iloc[-1]
         fund_data = self.get_fundamental_data()
 
+        # ★ [최적화 가중치 적용: 시장 전체]
         danger_score = 0
         reasons = []
-        if daily_chg < -1.5: danger_score += 20; reasons.append(f"📉 추세 하락")
-        if hourly_chg < -0.8: danger_score += 15; reasons.append(f"⚡ 투매 발생")
+        
+        # 1. 추세 (W_TREND = 30)
+        if daily_chg < -1.5: danger_score += W_TREND; reasons.append(f"📉 추세 하락 ({daily_chg:.2f}%)")
         
         cloud_status_text = "구름대 위 ✅"
         if current_close < cloud_bottom:
-            danger_score += 25
+            danger_score += W_TREND
             reasons.append("☁️ 구름대 하단 완전 이탈")
             cloud_status_text = "하단 이탈 (매도) 🚨"
-        elif current_close > cloud_top:
-            cloud_status_text = "구름대 위 (안정) ✅"
+        elif current_close > cloud_top: cloud_status_text = "구름대 위 (안정) ✅"
         else:
             if cloud_height > 0:
                 pos = (current_close - cloud_bottom) / cloud_height
                 if pos < 0.33:
-                    danger_score += 10
+                    # 구름대 내부 하단은 절반 가중치
+                    danger_score += int(W_TREND/2)
                     reasons.append("☁️ 구름대 하단 위협")
                     cloud_status_text = "구름대 하단 (불안) ⚡"
                 elif pos > 0.66: cloud_status_text = "구름대 상단 (조정) 🌤️"
@@ -417,27 +358,38 @@ class DangerAlertBot:
         ma_status_text = "정배열 ✅"
         if current_close < ma20 < ma50 < ma120:
             if slope20_down and slope50_down:
-                danger_score += 25
+                danger_score += W_TREND
                 reasons.append("📉 역배열(하락가속)")
                 ma_status_text = "역배열(가속) 🚨"
             else:
-                danger_score += 20
+                danger_score += int(W_TREND * 0.8) # 24점
                 reasons.append("📉 역배열(하락확정)")
                 ma_status_text = "역배열 ⚠️"
         elif ma20 < ma50 and current_close < ma20:
-            danger_score += 10
+            danger_score += int(W_TREND/2) # 15점
             reasons.append("📉 20/50 데드크로스")
             ma_status_text = "데드크로스 ⚠️"
             
-        if vol_ratio > 1.5: danger_score += 15; reasons.append(f"📢 거래량 폭증")
-        if dxy_chg > 0.3: danger_score += 10; reasons.append(f"💵 달러 강세")
-        if irx_chg > 2.0: danger_score += 10; reasons.append(f"🏦 단기금리 급등")
-        if btc_chg < -3.0: danger_score += 15; reasons.append(f"📉 비트코인 급락")
-        if semi_weakness > 0.005: danger_score += 10; reasons.append(f"📉 반도체 약세")
-        if hyg_drawdown < -0.3: danger_score += 15; reasons.append(f"💸 스마트머니 이탈")
-        if news_score < -0.2: danger_score += 10; reasons.append(f"📰 뉴스 심리 악화")
-        if fund_data and fund_data['is_recession']: danger_score += 30; reasons.append(f"🛑 샴의 법칙 발동 (침체)")
-        danger_score = min(danger_score, 100)
+        # 2. 변동성 (W_VOL = 15)
+        if hourly_chg < -0.8: danger_score += W_VOL; reasons.append(f"⚡ 1시간 투매 ({hourly_chg:.2f}%)")
+        if vol_ratio > 1.5: danger_score += W_VOL; reasons.append(f"📢 거래량 폭증 ({vol_ratio:.1f}배)")
+        if news_score < -0.2: danger_score += W_VOL; reasons.append(f"📰 뉴스 심리 악화 ({news_score:.2f})")
+        if rsi_val < 30: danger_score += int(W_VOL/2); reasons.append(f"과매도({rsi_val:.0f})")
+
+        # 3. 매크로 (W_MACRO = 10)
+        if dxy_chg > 0.3: danger_score += W_MACRO; reasons.append(f"💵 달러 강세 (+{dxy_chg:.2f}%)")
+        if irx_chg > 2.0: danger_score += W_MACRO; reasons.append(f"🏦 단기금리 급등 (+{irx_chg:.1f}%)")
+        if btc_chg < -3.0: danger_score += W_MACRO; reasons.append(f"📉 비트코인 급락 ({btc_chg:.2f}%)")
+        if semi_weakness > 0.005: danger_score += W_MACRO; reasons.append(f"📉 반도체 약세")
+        if hyg_drawdown < -0.3: danger_score += W_MACRO; reasons.append(f"💸 스마트머니 이탈 ({hyg_drawdown:.2f}%)")
+        if fund_data and fund_data['is_recession']: danger_score += W_TREND; reasons.append(f"🛑 샴의 법칙 발동 (침체)")
+        
+        # 추세 필터 (장기 상승장일 때 엄살 방지)
+        # 120선 위에 있으면 점수 15점 차감
+        if current_close > ma120:
+             danger_score -= 15
+             
+        danger_score = max(0, min(danger_score, 100))
 
         stock_results = []
         for ticker in TARGET_STOCKS.keys():
@@ -445,64 +397,46 @@ class DangerAlertBot:
                 res = self.analyze_individual(ticker, dfs[ticker], df)
                 if res: stock_results.append(res)
 
-        status_emoji = '🔴 위험' if danger_score >= 60 else '🟡 주의' if danger_score >= 35 else '🟢 안정'
+        # ★ [최적화된 판단 기준 적용]
+        status_emoji = '🟢 안정'
+        if danger_score >= TH_SELL: # 80점 이상
+            status_emoji = '🔴 위험 (매도)'
+        elif danger_score >= TH_BUY: # 40점 이상
+            status_emoji = '🟡 주의 (관망)'
+        else: # 40점 미만
+            # 점수는 낮지만 구조적 하락(역배열)인 경우 매수 금지
+            if current_close < ma120:
+                status_emoji = '🟡 주의 (하락추세)'
+            else:
+                status_emoji = '🟢 안정 (매수)'
+
         spread_str = "정상 ✅" if yield_spread >= 0 else "역전(침체) ⚠️"
         semi_str = "약세 ⚠️" if semi_weakness > 0.005 else "양호 ✅"
         hyg_str = "이탈 ⚠️" if hyg_drawdown < -0.3 else "유입 ✅"
         vix_str = "확산 ↗" if vix_trend > 0 else "안정 ↘"
-        
-        fund_str = "N/A"
-        if fund_data:
-            rec_emoji = "🚨 침체 경고" if fund_data['is_recession'] else "안정"
-            fund_str = f"실업률 {fund_data['unrate']}% / CPI {fund_data['cpi_yoy']:.1f}% ({rec_emoji})"
-
-        msg = f"🔔 *AI 퀀트 시장 정밀 분석*\n"
-        msg += f"📅 {now_kst.strftime('%Y-%m-%d %H:%M')} (KST)\n"
-        msg += f"🚦 종합상태: {status_emoji} ({danger_score}점)\n\n"
-        
-        msg += "*1️⃣ 매크로 & 펀더멘털 (Macro)*\n"
-        msg += f"• 경제지표 : {fund_str}\n"
-        msg += f"• 달러(DXY): {current_dxy:.2f} ({dxy_chg:+.2f}%)\n"
-        msg += f"• 금리(10Y): {current_tnx:.2f}% / (3M): {current_irx:.2f}%\n"
-        msg += f"• 장단기차 : {yield_spread:.2f}p ({spread_str})\n\n"
-        
-        msg += "*2️⃣ 기술적 지표 (Technical)*\n"
-        msg += f"• 나스닥 : {current_close:,.2f} ({daily_chg:+.2f}%)\n"
-        msg += f"• 1시간봉 : {hourly_chg:+.2f}% / 거래 {int(vol_ratio*100)}%\n"
-        msg += f"• 구름대 : {cloud_status_text}\n"
-        
-        # ★ [수정] 이평선 추세 화살표 추가
+        fund_str = f"실업률 {fund_data['unrate']}%" if fund_data else "N/A"
         arrow20 = "↗" if ma20 > ma20_prev else "↘"
         arrow50 = "↗" if ma50 > ma50_prev else "↘"
         arrow120 = "↗" if ma120 > ma120_prev else "↘"
-        
         str_ma20 = f"{ma20:,.1f}" if ma20 > 0 else "N/A"
         str_ma50 = f"{ma50:,.1f}" if ma50 > 0 else "N/A"
         str_ma120 = f"{ma120:,.1f}" if ma120 > 0 else "N/A"
         
-        msg += f"• 이평선 : {ma_status_text}\n"
-        msg += f"   └ 20선 {str_ma20}{arrow20} / 50선 {str_ma50}{arrow50} / 120선 {str_ma120}{arrow120}\n"
-        msg += f"• RSI(14) : {rsi_val:.1f}\n\n"
+        msg = f"🔔 *AI 퀀트 시장 정밀 분석*\n📅 {now_kst.strftime('%Y-%m-%d %H:%M')} (KST)\n🚦 종합상태: {status_emoji} ({danger_score}점)\n\n"
+        msg += f"*1️⃣ 매크로 & 펀더멘털*\n• 경제: {fund_str}\n• 달러: {current_dxy:.2f} ({dxy_chg:+.2f}%)\n• 금리: 10Y {current_tnx:.2f}% / 3M {current_irx:.2f}%\n• 장단기차: {yield_spread:.2f}p ({spread_str})\n\n"
+        msg += f"*2️⃣ 기술적 지표 (Technical)*\n• 나스닥: {current_close:,.2f} ({daily_chg:+.2f}%)\n• 1시간봉: {hourly_chg:+.2f}% / 거래 {int(vol_ratio*100)}%\n• 구름대: {cloud_status_text}\n• 이평선: {ma_status_text}\n   └ 20선 {str_ma20}{arrow20} / 50선 {str_ma50}{arrow50} / 120선 {str_ma120}{arrow120}\n• RSI(14): {rsi_val:.1f}\n\n"
+        msg += f"*3️⃣ 리스크 & 심리*\n• 비트코인: ${current_btc:,.0f} ({btc_chg:+.2f}%)\n• 반도체: {semi_str}\n• 하이일드: {hyg_str}\n• 공포지수: {current_vix:.2f} ({vix_str})\n• 뉴스점수: {news_score:.2f}\n"
         
-        msg += "*3️⃣ 리스크 & 심리 (Sentiment)*\n"
-        msg += f"• 비트코인 : ${current_btc:,.0f} ({btc_chg:+.2f}%)\n"
-        msg += f"• 반도체비 : {semi_str} (괴리 {semi_weakness*100:.1f}%)\n"
-        msg += f"• 하이일드 : {hyg_str} (낙폭 {hyg_drawdown:.2f}%)\n"
-        msg += f"• 공포지수 : {current_vix:.2f} (추세: {vix_str})\n"
-        msg += f"• 뉴스점수 : {news_score:.2f} ({'악재' if news_score<-0.2 else '중립/호재'})\n"
         if worst_title and news_score < -0.2:
             clean_title = re.sub(r'[\[\]\*\_]', '', worst_title)
             source_tag = f"[{worst_source}]" if worst_source else "[News]"
             msg += f"  └ 🗞 {source_tag} [{clean_title[:20]}...]({worst_link})\n"
             
         msg += "\n*📋 [상세 위험 요인 분석]*\n"
-        if reasons:
-            msg += "\n".join(["🚨 " + r for r in reasons])
-        else:
-            msg += "✅ 특이사항 없음 (안정적)"
+        if reasons: msg += "\n".join(["🚨 " + r for r in reasons])
+        else: msg += "✅ 특이사항 없음 (안정적)"
 
-        msg += "\n\n───────────────\n"
-        msg += "*📊 종목별 위험도 (현재가/등락률)*\n"
+        msg += "\n\n───────────────\n*📊 종목별 위험도 (현재가/등락률)*\n"
         for item in stock_results:
             icon = "🔴" if item['score'] >= 60 else "🟡" if item['score'] >= 30 else "🟢"
             price_info = f"${item['price']:,.2f} ({item['change']:+.2f}%)"
