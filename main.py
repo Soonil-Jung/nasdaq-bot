@@ -17,7 +17,6 @@ import re
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
 
-# 종목 리스트 (순서 고정)
 TARGET_STOCKS = {
     'GOOGL': 'Google Alphabet',
     'MSFT': 'Microsoft',
@@ -48,7 +47,7 @@ TH_BUY = 40
 
 class DangerAlertBot:
     def __init__(self):
-        print("🤖 AI 시스템(v52-Clean-Display) 가동 중...")
+        print("🤖 AI 시스템(v53-TimeFix) 가동 중...")
         try:
             self.tokenizer = BertTokenizer.from_pretrained('ProsusAI/finbert')
             self.model = BertForSequenceClassification.from_pretrained('ProsusAI/finbert')
@@ -93,6 +92,7 @@ class DangerAlertBot:
 
     def get_session_summary(self):
         try:
+            # 5분봉으로 오늘 하루 흐름 분석
             df = yf.download("NQ=F", period="1d", interval="5m", progress=False, ignore_tz=True)
             if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
             
@@ -175,7 +175,6 @@ class DangerAlertBot:
             macro_tickers = ['NQ=F', 'QQQ', '^VIX', 'DX-Y.NYB', 'SOXX', 'HYG', '^TNX', 'BTC-USD', '^IRX']
             all_tickers = macro_tickers + list(TARGET_STOCKS.keys())
             data = yf.download(all_tickers, period='1mo', interval='1h', prepost=True, progress=False, ignore_tz=True, auto_adjust=True)
-            
             if isinstance(data.columns, pd.MultiIndex): 
                 dfs = {}
                 df_macro = pd.DataFrame()
@@ -226,13 +225,9 @@ class DangerAlertBot:
         try:
             sma20 = SMAIndicator(close=df_stock['Close'], window=20).sma_indicator()
             sma50 = SMAIndicator(close=df_stock['Close'], window=50).sma_indicator()
-            sma120 = SMAIndicator(close=df_stock['Close'], window=120).sma_indicator()
-            ma20 = sma20.iloc[-1]; ma50 = sma50.iloc[-1]; ma120 = sma120.iloc[-1]
-            slope20_down = ma20 < sma20.iloc[-2]
-            slope50_down = ma50 < sma50.iloc[-2]
+            ma20 = sma20.iloc[-1]; ma50 = sma50.iloc[-1]
         except:
-            ma20, ma50, ma120 = 0, 0, 0
-            slope20_down, slope50_down = False, False
+            ma20, ma50 = 0, 0
 
         rsi_val = RSIIndicator(close=df_stock['Close'], window=14).rsi().iloc[-1]
         df_stock['Vol_MA20'] = df_stock['Volume'].rolling(window=20).mean()
@@ -268,9 +263,12 @@ class DangerAlertBot:
         if is_tech_bad:
             danger_score += w_tech
             reasons.append(f"기술적({','.join(tech_reasons)})")
-
-        # 추세 필터
-        if ma120 > 0 and current_price > ma120: danger_score -= 15
+            
+        # 추세 필터 (120시간선)
+        try:
+            ma120 = SMAIndicator(close=df_stock['Close'], window=120).sma_indicator().iloc[-1]
+            if ma120 > 0 and current_price > ma120: danger_score -= 15
+        except: pass
 
         if news_score < -0.3:
             danger_score += 15
@@ -379,6 +377,7 @@ class DangerAlertBot:
         vix_trend = current_vix - df['VIX'].rolling(window=5).mean().iloc[-1]
         fund_data = self.get_fundamental_data()
 
+        # 점수 산정
         danger_score = 0
         reasons = []
         if daily_chg < -1.5: danger_score += W_TREND_MACRO; reasons.append(f"📉 추세 하락 ({daily_chg:.2f}%)")
@@ -404,9 +403,15 @@ class DangerAlertBot:
         ma_status_text = "정배열 ✅"
         if ma20 > 0:
             if current_close < ma20 < ma50 < ma120:
-                if slope20_down and slope50_down: danger_score += W_TREND_MACRO; reasons.append("📉 역배열(하락가속)"); ma_status_text = "역배열(가속) 🚨"
-                else: danger_score += int(W_TREND_MACRO*0.8); reasons.append("📉 역배열(하락확정)"); ma_status_text = "역배열 ⚠️"
-            elif ma20 < ma50 and current_close < ma20: danger_score += int(W_TREND_MACRO/2); reasons.append("📉 20/50 데드크로스"); ma_status_text = "데드크로스 ⚠️"
+                if slope20_down and slope50_down:
+                    danger_score += W_TREND_MACRO; reasons.append("📉 역배열(하락가속)")
+                    ma_status_text = "역배열(가속) 🚨"
+                else:
+                    danger_score += int(W_TREND_MACRO*0.8); reasons.append("📉 역배열(하락확정)")
+                    ma_status_text = "역배열 ⚠️"
+            elif ma20 < ma50 and current_close < ma20:
+                danger_score += int(W_TREND_MACRO/2); reasons.append("📉 20/50 데드크로스")
+                ma_status_text = "데드크로스 ⚠️"
         else: ma_status_text = "N/A"
             
         if vol_ratio > 1.5: danger_score += W_VOL_MACRO; reasons.append(f"📢 거래량 폭증 ({vol_ratio:.1f}배)")
@@ -467,12 +472,13 @@ class DangerAlertBot:
             icon = "🔴" if item['score'] >= item['threshold'] else "🟡" if item['score'] >= item['threshold'] * 0.6 else "🟢"
             price_info = f"${item['price']:,.2f} ({item['change']:+.2f}%)"
             msg += f"{icon} *{item['ticker']}*: {price_info} | {item['score']}점\n"
-            # ★ [수정] 위험할 때만 사유 표시 (v49 스타일 복원)
+            # ★ [수정] 위험할 때만 사유 표시 (v52 기준)
             if item['score'] >= item['threshold'] * 0.5:
                 reason_str = ", ".join(item['reasons']) if item['reasons'] else ""
                 msg += f"  └ {reason_str}\n"
         
-        if hour == 6:
+        # ★ [수정] 아침 6시(5시 or 6시 실행)에만 모닝 브리핑 추가
+        if hour == 5 or hour == 6:
              trend_summary = self.get_session_summary()
              msg += f"\n\n🌙 *[밤사이 시장 요약]*\n{trend_summary}"
 
