@@ -8,3 +8,5 @@ torch
 GoogleNews
 newspaper3k
 pandas-datareader
+tensorflow
+scikit-learn
