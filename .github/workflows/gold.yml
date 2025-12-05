@@ -1,0 +1,33 @@
+name: Gold Prediction Bot
+
+on:
+  schedule:
+    # 한국 시간 아침 7시 40분 실행 (UTC 22:40)
+    # 나스닥 봇과 겹치지 않게 시간 조절 권장
+    - cron: '40 22 * * 1-5'
+  workflow_dispatch: # 수동 실행 버튼
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: 코드 체크아웃
+      uses: actions/checkout@v3
+
+    - name: 파이썬 설정
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+
+    - name: 라이브러리 설치
+      run: |
+        pip install -r requirements.txt
+
+    - name: 금값 예측 실행
+      env:
+        # 기존 나스닥 봇에서 쓰던 Secret을 그대로 사용합니다.
+        TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      run: |
+        python gold_predict.py
