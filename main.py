@@ -47,7 +47,7 @@ TH_BUY = 40
 
 class DangerAlertBot:
     def __init__(self):
-        print("🤖 AI 시스템(v54-Show-All-Reasons) 가동 중...")
+        print("🤖 AI 시스템(v55-News-Source) 가동 중...")
         try:
             self.tokenizer = BertTokenizer.from_pretrained('ProsusAI/finbert')
             self.model = BertForSequenceClassification.from_pretrained('ProsusAI/finbert')
@@ -101,18 +101,17 @@ class DangerAlertBot:
                 change_pct = (close_p - open_p) / open_p * 100
                 range_pct = (high_p - low_p) / open_p * 100
                 
-                if range_pct < 0.5: trend_str = "➡️ **지루한 횡보장** (변동성 미미)"
+                if range_pct < 0.5: trend_str = "➡️ **지루한 횡보장**"
                 else:
                     if change_pct > 0.5:
-                        if low_p < open_p * 0.997: trend_str = "✅ **V자 반등 성공** (초반 약세 후 회복)"
-                        else: trend_str = "📈 **강한 상승세** (시가부터 밀어올림)"
+                        if low_p < open_p * 0.997: trend_str = "✅ **V자 반등 성공**"
+                        else: trend_str = "📈 **강한 상승세**"
                     elif change_pct < -0.5:
-                        if high_p > open_p * 1.003: trend_str = "⚠️ **전강후약 하락** (상승분 반납)"
-                        else: trend_str = "📉 **지속적인 매도세** (반등 실패)"
+                        if high_p > open_p * 1.003: trend_str = "⚠️ **전강후약 하락**"
+                        else: trend_str = "📉 **지속적인 매도세**"
                     else:
-                        if range_pct > 1.0: trend_str = "⚡ **변동성 심한 혼조세** (방향성 부재)"
-                        else: trend_str = "➡️ **눈치보기 장세** (보합 마감)"
-                
+                        if range_pct > 1.0: trend_str = "⚡ **변동성 심한 혼조세**"
+                        else: trend_str = "➡️ **눈치보기 장세**"
                 return f"{trend_str}\n   (시가대비 {change_pct:+.2f}% / 고저폭 {range_pct:.2f}%)"
             else: return "데이터 없음"
         except: return "분석 불가"
@@ -140,9 +139,11 @@ class DangerAlertBot:
             count = 0
             worst_title = ""
             worst_link = ""
-            worst_source = ""
+            worst_source = "" # 언론사 저장
             min_score = 1.0 
+
             search_list = [target_keywords] if isinstance(target_keywords, str) else target_keywords
+
             for key in search_list:
                 googlenews.clear()
                 googlenews.search(key)
@@ -152,13 +153,18 @@ class DangerAlertBot:
                     try:
                         title = item['title']
                         link = item['link']
+                        media = item['media'] # 언론사
+                        
                         if '&ved=' in link: link = link.split('&ved=')[0]
-                        media = item['media']
+                        
+                        # 마크다운 특수문자 제거
                         title_clean = re.sub(r'[\[\]\*\_]', '', title)
                         res = self.nlp(title_clean[:512])[0]
                         score = res['score'] if res['label'] == 'positive' else -res['score'] if res['label'] == 'negative' else 0
                         total_score += score
                         count += 1
+                        
+                        # 가장 부정적인 뉴스 찾기
                         if score < min_score and score < -0.5:
                             min_score = score
                             worst_title = title_clean
@@ -224,13 +230,8 @@ class DangerAlertBot:
         try:
             sma20 = SMAIndicator(close=df_stock['Close'], window=20).sma_indicator()
             sma50 = SMAIndicator(close=df_stock['Close'], window=50).sma_indicator()
-            sma120 = SMAIndicator(close=df_stock['Close'], window=120).sma_indicator()
-            ma20 = sma20.iloc[-1]; ma50 = sma50.iloc[-1]; ma120 = sma120.iloc[-1]
-            slope20_down = ma20 < sma20.iloc[-2]
-            slope50_down = ma50 < sma50.iloc[-2]
-        except:
-            ma20, ma50, ma120 = 0, 0, 0
-            slope20_down, slope50_down = False, False
+            ma20 = sma20.iloc[-1]; ma50 = sma50.iloc[-1]
+        except: ma20, ma50 = 0, 0
 
         rsi_val = RSIIndicator(close=df_stock['Close'], window=14).rsi().iloc[-1]
         df_stock['Vol_MA20'] = df_stock['Volume'].rolling(window=20).mean()
@@ -248,6 +249,7 @@ class DangerAlertBot:
         relative_strength = daily_pct - qqq_chg
 
         search_keyword = TARGET_STOCKS.get(ticker, ticker)
+        # ★ [수정] 뉴스 출처까지 받아오기
         news_score, worst_news, worst_link, worst_source = self.get_news_sentiment(search_keyword)
 
         danger_score = 0
@@ -267,16 +269,14 @@ class DangerAlertBot:
             danger_score += w_tech
             reasons.append(f"기술적({','.join(tech_reasons)})")
 
-        # 추세 필터
-        if ma120 > 0 and current_price > ma120: danger_score -= 15
-
         if news_score < -0.3:
-            danger_score += 15
+            danger_score += 20
             if worst_news and worst_link:
-                clean_title = worst_news[:25] + "..." if len(worst_news) > 25 else worst_news
+                clean_title = worst_news[:20] + "..." if len(worst_news) > 20 else worst_news
                 source_tag = f"[{worst_source}]" if worst_source else "[News]"
-                reasons.append(f"📰 {source_tag} [{clean_title}]({worst_link})")
-            else: reasons.append(f"📰 악재 뉴스")
+                # ★ [수정] 악재 뉴스에 출처와 제목 표시
+                reasons.append(f"📰 악재: {source_tag} [{clean_title}]({worst_link})")
+            else: reasons.append(f"📰 악재 뉴스 감지")
             
         danger_score = max(0, min(danger_score, 100))
 
@@ -302,20 +302,18 @@ class DangerAlertBot:
         btc_chg = (current_btc - df['BTC'].iloc[idx_day]) / df['BTC'].iloc[idx_day] * 100
         news_score, worst_title, worst_link, worst_source = self.get_news_sentiment(self.macro_keywords)
 
-        # [주말 모드]
         if is_weekend_mode:
             btc_emoji = "🔥 급등" if btc_chg > 3 else "📉 급락" if btc_chg < -3 else "➡️ 횡보"
             news_emoji = "😊 호재/중립" if news_score >= -0.2 else "🚨 악재 우세"
-            msg = f"☕ *주말 시장 핵심 브리핑 (Pure Quant)*\n📅 {now_kst.strftime('%Y-%m-%d %H:%M')} (KST)\n\n*1️⃣ 비트코인 (24h Live)*\n• 가격 : ${current_btc:,.0f} ({btc_chg:+.2f}%)\n• 추세 : {btc_emoji}\n\n*2️⃣ 주말 주요 뉴스*\n• 심리점수 : {news_score:.2f} ({news_emoji})\n"
+            msg = f"☕ *주말 시장 핵심 브리핑*\n📅 {now_kst.strftime('%Y-%m-%d %H:%M')} (KST)\n\n*1️⃣ 비트코인 (24h Live)*\n• 가격 : ${current_btc:,.0f} ({btc_chg:+.2f}%)\n• 추세 : {btc_emoji}\n\n*2️⃣ 주말 주요 뉴스*\n• 심리점수 : {news_score:.2f} ({news_emoji})\n"
             if worst_title and news_score < -0.2:
                 clean_title = re.sub(r'[\[\]\*\_]', '', worst_title)
                 source_tag = f"[{worst_source}]" if worst_source else "[News]"
-                msg += f"  └ 🗞 {source_tag} [{clean_title[:30]}...]({worst_link})\n"
+                msg += f"  └ 🗞 {source_tag} [{clean_title[:20]}...]({worst_link})\n"
             elif news_score >= -0.2: msg += "  └ 특이사항 없는 평온한 주말입니다.\n"
             self.send_telegram(msg)
             return
 
-        # [평일 모드]
         nq_chart = self.get_realtime_chart('NQ=F')
         ma20, ma50, ma120 = 0, 0, 0
         ma20_prev, ma50_prev, ma120_prev = 0, 0, 0
@@ -432,7 +430,6 @@ class DangerAlertBot:
         else:
             if (ma_status_text != "정배열 ✅" and ma_status_text != "N/A") or current_close < cloud_bottom:
                 status_emoji = '🟡 주의 (하락추세)'
-            else: status_emoji = '🟢 안정 (매수)'
 
         spread_str = "정상 ✅" if yield_spread >= 0 else "역전(침체) ⚠️"
         semi_str = "약세 ⚠️" if semi_weakness > 0.005 else "양호 ✅"
@@ -467,7 +464,7 @@ class DangerAlertBot:
             icon = "🔴" if item['score'] >= item['threshold'] else "🟡" if item['score'] >= item['threshold'] * 0.6 else "🟢"
             price_info = f"${item['price']:,.2f} ({item['change']:+.2f}%)"
             msg += f"{icon} *{item['ticker']}*: {price_info} | {item['score']}점\n"
-            if item['score'] > 0:
+            if item['score'] >= item['threshold'] * 0.5:
                 reason_str = ", ".join(item['reasons']) if item['reasons'] else ""
                 msg += f"  └ {reason_str}\n"
         
