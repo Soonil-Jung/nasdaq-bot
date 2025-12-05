@@ -22,7 +22,7 @@ jobs:
 
     - name: 라이브러리 설치
       run: |
-        pip install -r requirements.txt
+        pip install -r requirements_gold.txt
 
     - name: 금값 예측 실행
       env:
