@@ -1,16 +1,19 @@
 import os
-import yfinance as yf
-import pandas as pd
-import numpy as np
+import time
+import re
+import asyncio
+import aiohttp
+import feedparser
 import requests
+import numpy as np
+import pandas as pd
+import yfinance as yf
 import pandas_datareader.data as web
+from datetime import datetime, timedelta
+from bs4 import BeautifulSoup
 from ta.trend import IchimokuIndicator, SMAIndicator
 from ta.momentum import RSIIndicator
 from transformers import BertTokenizer, BertForSequenceClassification, pipeline
-from GoogleNews import GoogleNews
-from datetime import datetime, timedelta
-import time
-import re
 
 # ======================================================
 # ▼▼▼ 사용자 설정 정보 ▼▼▼
@@ -47,430 +50,336 @@ TH_BUY = 40
 
 class DangerAlertBot:
     def __init__(self):
-        print("🤖 AI 시스템(v55-News-Source) 가동 중...")
+        print("🤖 AI 퀀트 시스템(Pro Ver.) 가동 중...")
         try:
+            # FinBERT: 금융 특화 감성 분석 모델
             self.tokenizer = BertTokenizer.from_pretrained('ProsusAI/finbert')
             self.model = BertForSequenceClassification.from_pretrained('ProsusAI/finbert')
             self.nlp = pipeline("sentiment-analysis", model=self.model, tokenizer=self.tokenizer)
-        except: pass
+        except Exception as e:
+            print(f"⚠️ AI 모델 로드 실패: {e}")
+            self.nlp = None
         
         self.macro_keywords = [
-            'Federal Reserve', 'The Fed', 'US Fed', 'FOMC', 'US Treasury',
-            'Jerome Powell', 'Donald Trump', 'Nick Timiraos', 'Scott Bessent',
-            'Kevin Warsh', 'Jamie Dimon', 'Bill Ackman', 'Larry Fink', 'Michael Burry',
-            'John Williams', 'Christopher Waller',
-            'CPI Inflation', 'PCE Inflation', 'PPI Inflation', 'GDP Growth', 'Recession', 'Stagflation',
-            'Jobs Report', 'Nonfarm Payrolls', 'Unemployment Rate', 'ADP Report', 'JOLTS',
-            'Bloomberg Markets', 'Goldman Sachs', 'Morgan Stanley', 'JP Morgan'
+            'Federal Reserve', 'The Fed', 'Jerome Powell', 'FOMC', 
+            'CPI Inflation', 'Recession', 'Stagflation', 'US Economy',
+            'Geopolitical tension', 'Market Crash', 'Liquidity crisis'
         ]
 
     def send_telegram(self, message):
-        if not TELEGRAM_TOKEN: return
+        if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+            print("❌ 텔레그램 토큰 없음")
+            return
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
         data = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown", "disable_web_page_preview": True}
-        try: requests.post(url, data=data)
-        except: pass
+        try: requests.post(url, data=data, timeout=10)
+        except Exception as e: print(f"텔레그램 전송 실패: {e}")
 
-    def get_realtime_price(self, ticker):
-        for _ in range(3):
-            try:
-                stock = yf.Ticker(ticker)
-                df = stock.history(period='1d', interval='1m', prepost=True, auto_adjust=True)
-                if not df.empty: return df['Close'].iloc[-1]
-                if stock.fast_info.get('last_price'): return stock.fast_info.get('last_price')
-            except: time.sleep(1)
-        return None
-
-    def get_realtime_chart(self, ticker):
+    # ------------------------------------------------------------------
+    # [뉴스 분석 엔진] 비동기 RSS 피드 + FinBERT (속도/신뢰성 개선)
+    # ------------------------------------------------------------------
+    async def fetch_feed(self, session, keyword):
+        """구글 뉴스 RSS 비동기 요청"""
+        url = f"https://news.google.com/rss/search?q={keyword}&hl=en-US&gl=US&ceid=US:en"
         try:
-            df = yf.download(ticker, period='1mo', interval='1h', prepost=True, progress=False, ignore_tz=True)
-            if df.empty: return None
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = df.columns.get_level_values(0)
-            return df
+            async with session.get(url, timeout=5) as response:
+                if response.status == 200:
+                    xml_data = await response.text()
+                    return keyword, xml_data
+        except: pass
+        return keyword, None
+
+    async def process_news_async(self, keywords):
+        """뉴스 데이터 병렬 처리 및 AI 감성 분석"""
+        if not self.nlp: return 0, "", "", ""
+        
+        search_list = [keywords] if isinstance(keywords, str) else keywords
+        total_score = 0
+        count = 0
+        worst_info = {"score": 1.0, "title": "", "link": "", "source": ""}
+
+        async with aiohttp.ClientSession() as session:
+            tasks = [self.fetch_feed(session, key) for key in search_list]
+            feeds = await asyncio.gather(*tasks)
+
+            for key, xml_data in feeds:
+                if not xml_data: continue
+                feed = feedparser.parse(xml_data)
+                
+                # 키워드 당 최신 3개 기사만 분석 (속도 최적화)
+                for entry in feed.entries[:3]:
+                    try:
+                        title = entry.title
+                        link = entry.link
+                        source = entry.source.title if 'source' in entry else "News"
+                        
+                        # HTML 태그 제거
+                        clean_title = BeautifulSoup(title, "html.parser").get_text()
+                        # AI 분석 (최대 512토큰)
+                        res = self.nlp(clean_title[:512])[0]
+                        
+                        score = 0
+                        if res['label'] == 'positive': score = res['score']
+                        elif res['label'] == 'negative': score = -res['score']
+                        
+                        total_score += score
+                        count += 1
+                        
+                        # 가장 부정적인 뉴스 추적
+                        if score < worst_info["score"] and score < -0.5:
+                            worst_info = {
+                                "score": score,
+                                "title": clean_title,
+                                "link": link,
+                                "source": source
+                            }
+                    except: continue
+        
+        avg_score = total_score / count if count > 0 else 0
+        return avg_score, worst_info["title"], worst_info["link"], worst_info["source"]
+
+    def get_news_sentiment(self, target_keywords):
+        """동기 래퍼 함수"""
+        try:
+            return asyncio.run(self.process_news_async(target_keywords))
+        except Exception as e:
+            print(f"뉴스 분석 오류: {e}")
+            return 0, "", "", ""
+
+    # ------------------------------------------------------------------
+    # [데이터 수집] 매크로 & 개별 종목
+    # ------------------------------------------------------------------
+    def get_realtime_price(self, ticker):
+        try:
+            stock = yf.Ticker(ticker)
+            return stock.fast_info.get('last_price', None)
         except: return None
 
-    def get_session_summary(self):
+    def get_market_data(self):
+        """주요 지표 일괄 다운로드"""
         try:
-            df = yf.download("NQ=F", period="1d", interval="5m", progress=False, ignore_tz=True)
-            if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
+            # ^VIX3M: 3개월 VIX (구조 분석용)
+            # ^MMTW: 나스닥 종목 중 20일 이평선 상회 비율 (시장 너비) - 티커 확인 필요 (대안: ^NYA200R 등)
+            # 여기서는 안정적인 데이터 확보를 위해 VIX3M 추가
+            macro_tickers = ['NQ=F', 'QQQ', '^VIX', '^VIX3M', 'DX-Y.NYB', 'SOXX', 'HYG', '^TNX', '^IRX', 'BTC-USD']
+            all_tickers = macro_tickers + list(TARGET_STOCKS.keys())
             
-            if not df.empty:
-                open_p = df['Open'].iloc[0]; close_p = df['Close'].iloc[-1]
-                high_p = df['High'].max(); low_p = df['Low'].min()
-                change_pct = (close_p - open_p) / open_p * 100
-                range_pct = (high_p - low_p) / open_p * 100
+            data = yf.download(all_tickers, period='1mo', interval='1h', prepost=True, progress=False, ignore_tz=True)
+            
+            # 멀티인덱스 처리
+            if isinstance(data.columns, pd.MultiIndex):
+                dfs = {}
+                df_macro = pd.DataFrame()
                 
-                if range_pct < 0.5: trend_str = "➡️ **지루한 횡보장**"
-                else:
-                    if change_pct > 0.5:
-                        if low_p < open_p * 0.997: trend_str = "✅ **V자 반등 성공**"
-                        else: trend_str = "📈 **강한 상승세**"
-                    elif change_pct < -0.5:
-                        if high_p > open_p * 1.003: trend_str = "⚠️ **전강후약 하락**"
-                        else: trend_str = "📉 **지속적인 매도세**"
-                    else:
-                        if range_pct > 1.0: trend_str = "⚡ **변동성 심한 혼조세**"
-                        else: trend_str = "➡️ **눈치보기 장세**"
-                return f"{trend_str}\n   (시가대비 {change_pct:+.2f}% / 고저폭 {range_pct:.2f}%)"
-            else: return "데이터 없음"
-        except: return "분석 불가"
+                # Close 데이터 추출
+                if 'Close' in data.columns:
+                    close_data = data['Close']
+                    # 필수 데이터 체크
+                    if 'NQ=F' not in close_data.columns: return {}
+                    
+                    df_macro['Close'] = close_data['NQ=F']
+                    df_macro['High'] = data['High']['NQ=F'] if 'High' in data.columns else close_data['NQ=F']
+                    df_macro['Low'] = data['Low']['NQ=F'] if 'Low' in data.columns else close_data['NQ=F']
+                    df_macro['Volume'] = data['Volume']['QQQ'] if 'Volume' in data.columns and 'QQQ' in data['Volume'].columns else 0
+                    
+                    # 매크로 지표 매핑
+                    ticker_map = {
+                        '^VIX': 'VIX', '^VIX3M': 'VIX3M', 'DX-Y.NYB': 'DXY', 
+                        'SOXX': 'SOXX', 'HYG': 'HYG', '^TNX': 'TNX', '^IRX': 'IRX', 'BTC-USD': 'BTC'
+                    }
+                    for t, col in ticker_map.items():
+                        if t in close_data.columns:
+                            df_macro[col] = close_data[t]
+                    
+                    df_macro = df_macro.ffill().bfill()
+                    dfs['MACRO'] = df_macro
+                    
+                    # 개별 종목 데이터 추출
+                    for ticker in TARGET_STOCKS.keys():
+                        if ticker in close_data.columns:
+                            df_stock = pd.DataFrame()
+                            df_stock['Close'] = close_data[ticker]
+                            df_stock['High'] = data['High'][ticker]
+                            df_stock['Low'] = data['Low'][ticker]
+                            df_stock['Volume'] = data['Volume'][ticker] if 'Volume' in data.columns else 0
+                            dfs[ticker] = df_stock.dropna()
+                    return dfs
+            return {}
+        except Exception as e:
+            print(f"데이터 다운로드 실패: {e}")
+            return {}
 
     def get_fundamental_data(self):
         try:
             start_date = datetime.now() - timedelta(days=700)
             unrate = web.DataReader('UNRATE', 'fred', start_date)
-            cpi = web.DataReader('CPIAUCSL', 'fred', start_date)
-            if unrate.empty or cpi.empty: return None
-
+            # Sahm Rule 계산
             unrate['MA3'] = unrate['UNRATE'].rolling(window=3).mean()
-            current_ma3 = unrate['MA3'].iloc[-1]
+            curr_ma3 = unrate['MA3'].iloc[-1]
             low_12m = unrate['UNRATE'].iloc[-14:-1].min()
-            sahm_score = current_ma3 - low_12m
-            is_recession = sahm_score >= 0.50
-            cpi_yoy = (cpi['CPIAUCSL'].iloc[-1] - cpi['CPIAUCSL'].iloc[-13]) / cpi['CPIAUCSL'].iloc[-13] * 100
-            return {"unrate": unrate['UNRATE'].iloc[-1], "sahm_score": sahm_score, "is_recession": is_recession, "cpi_yoy": cpi_yoy}
+            sahm_score = curr_ma3 - low_12m
+            return {"unrate": unrate['UNRATE'].iloc[-1], "sahm_score": sahm_score, "is_recession": sahm_score >= 0.50}
         except: return None
 
-    def get_news_sentiment(self, target_keywords):
-        try:
-            googlenews = GoogleNews(lang='en', period='1d')
-            total_score = 0
-            count = 0
-            worst_title = ""
-            worst_link = ""
-            worst_source = "" # 언론사 저장
-            min_score = 1.0 
-
-            search_list = [target_keywords] if isinstance(target_keywords, str) else target_keywords
-
-            for key in search_list:
-                googlenews.clear()
-                googlenews.search(key)
-                results = googlenews.results(sort=True)
-                if not results: continue
-                for item in results[:5]:
-                    try:
-                        title = item['title']
-                        link = item['link']
-                        media = item['media'] # 언론사
-                        
-                        if '&ved=' in link: link = link.split('&ved=')[0]
-                        
-                        # 마크다운 특수문자 제거
-                        title_clean = re.sub(r'[\[\]\*\_]', '', title)
-                        res = self.nlp(title_clean[:512])[0]
-                        score = res['score'] if res['label'] == 'positive' else -res['score'] if res['label'] == 'negative' else 0
-                        total_score += score
-                        count += 1
-                        
-                        # 가장 부정적인 뉴스 찾기
-                        if score < min_score and score < -0.5:
-                            min_score = score
-                            worst_title = title_clean
-                            worst_link = link
-                            worst_source = media
-                    except: continue
-            avg_score = total_score / count if count > 0 else 0
-            return avg_score, worst_title, worst_link, worst_source
-        except: return 0, "", "", ""
-
-    def get_market_data(self):
-        try:
-            macro_tickers = ['NQ=F', 'QQQ', '^VIX', 'DX-Y.NYB', 'SOXX', 'HYG', '^TNX', 'BTC-USD', '^IRX']
-            all_tickers = macro_tickers + list(TARGET_STOCKS.keys())
-            data = yf.download(all_tickers, period='1mo', interval='1h', prepost=True, progress=False, ignore_tz=True, auto_adjust=True)
-            if isinstance(data.columns, pd.MultiIndex): 
-                dfs = {}
-                df_macro = pd.DataFrame()
-                if 'Close' not in data.columns or 'NQ=F' not in data['Close'].columns: return {}
-                df_macro['Close'] = data['Close']['NQ=F']
-                df_macro['High'] = data['High']['NQ=F']
-                df_macro['Low'] = data['Low']['NQ=F']
-                df_macro['Volume'] = data['Volume']['QQQ']
-                for ticker, col in {'^VIX':'VIX', 'DX-Y.NYB':'DXY', 'SOXX':'SOXX', 'HYG':'HYG', '^TNX':'TNX', '^IRX':'IRX', 'BTC-USD':'BTC'}.items():
-                    if ticker in data['Close'].columns: df_macro[col] = data['Close'][ticker]
-                    else: df_macro[col] = np.nan
-                df_macro = df_macro.ffill().bfill().dropna()
-                dfs['MACRO'] = df_macro
-                for ticker in TARGET_STOCKS.keys():
-                    if ticker in data['Close'].columns:
-                        df_stock = pd.DataFrame()
-                        df_stock['Close'] = data['Close'][ticker]
-                        df_stock['High'] = data['High'][ticker]
-                        df_stock['Low'] = data['Low'][ticker]
-                        df_stock['Volume'] = data['Volume'][ticker]
-                        df_stock = df_stock.dropna()
-                        dfs[ticker] = df_stock
-                return dfs
-            else: return {}
-        except: return {}
-
+    # ------------------------------------------------------------------
+    # [분석 엔진] 위험 감지 로직 (Logic Improved)
+    # ------------------------------------------------------------------
     def analyze_individual(self, ticker, df_stock, df_macro):
         if df_stock.empty or len(df_stock) < 30: return None
 
         params = STOCK_PARAMS.get(ticker, {'crash': 30, 'rel': 15, 'tech': 15, 'sell': 60})
-        w_crash, w_rel, w_tech, th_sell = params.values()
-
-        live_price = self.get_realtime_price(ticker)
-        current_price = live_price if live_price else df_stock['Close'].iloc[-1]
-
-        try:
-            prev_close = yf.Ticker(ticker).info.get('previousClose')
-            if not prev_close: prev_close = df_stock['Close'].iloc[-8]
-        except: prev_close = df_stock['Close'].iloc[-8]
-        if prev_close == 0: daily_pct = 0
-        else: daily_pct = (current_price - prev_close) / prev_close * 100
-
-        ichimoku = IchimokuIndicator(high=df_stock['High'], low=df_stock['Low'], window1=9, window2=26, window3=52)
-        span_a = ichimoku.ichimoku_a().iloc[-26]
-        span_b = ichimoku.ichimoku_b().iloc[-26]
-        cloud_bottom = min(span_a, span_b)
         
-        try:
-            sma20 = SMAIndicator(close=df_stock['Close'], window=20).sma_indicator()
-            sma50 = SMAIndicator(close=df_stock['Close'], window=50).sma_indicator()
-            ma20 = sma20.iloc[-1]; ma50 = sma50.iloc[-1]
-        except: ma20, ma50 = 0, 0
+        current_price = df_stock['Close'].iloc[-1]
+        prev_close = df_stock['Close'].iloc[-8] # 약 하루 전 (1시간봉 기준 8개)
+        daily_pct = (current_price - prev_close) / prev_close * 100
 
-        rsi_val = RSIIndicator(close=df_stock['Close'], window=14).rsi().iloc[-1]
-        df_stock['Vol_MA20'] = df_stock['Volume'].rolling(window=20).mean()
-        vol_ratio = 0 if df_stock['Vol_MA20'].iloc[-1] == 0 else df_stock['Volume'].iloc[-1] / df_stock['Vol_MA20'].iloc[-1]
+        # 일목균형표
+        ichimoku = IchimokuIndicator(high=df_stock['High'], low=df_stock['Low'], window1=9, window2=26, window3=52)
+        cloud_bottom = min(ichimoku.ichimoku_a().iloc[-26], ichimoku.ichimoku_b().iloc[-26])
+        
+        # 이평선
+        ma20 = SMAIndicator(close=df_stock['Close'], window=20).sma_indicator().iloc[-1]
+        ma50 = SMAIndicator(close=df_stock['Close'], window=50).sma_indicator().iloc[-1]
+        
+        # RSI & 거래량
+        rsi = RSIIndicator(close=df_stock['Close'], window=14).rsi().iloc[-1]
+        vol_ma = df_stock['Volume'].rolling(window=20).mean().iloc[-1]
+        vol_ratio = df_stock['Volume'].iloc[-1] / vol_ma if vol_ma > 0 else 0
 
-        qqq_chg = 0
-        try:
-            nq_live = self.get_realtime_price('NQ=F')
-            if not nq_live: nq_live = df_macro['Close'].iloc[-1]
-            qqq_now = nq_live
-            idx = -24 if len(df_macro) >= 24 else 0
-            qqq_prev = df_macro['Close'].iloc[idx] 
-            if qqq_prev != 0: qqq_chg = (qqq_now - qqq_prev) / qqq_prev * 100
-        except: pass
-        relative_strength = daily_pct - qqq_chg
+        # 상대강도
+        nq_chg = (df_macro['Close'].iloc[-1] - df_macro['Close'].iloc[-8]) / df_macro['Close'].iloc[-8] * 100
+        rel_strength = daily_pct - nq_chg
 
-        search_keyword = TARGET_STOCKS.get(ticker, ticker)
-        # ★ [수정] 뉴스 출처까지 받아오기
-        news_score, worst_news, worst_link, worst_source = self.get_news_sentiment(search_keyword)
+        # 뉴스 분석
+        news_score, worst_n, worst_l, worst_s = self.get_news_sentiment(ticker)
 
-        danger_score = 0
+        # 점수 계산
+        score = 0
         reasons = []
 
-        if daily_pct < -3.0: danger_score += w_crash; reasons.append(f"📉 폭락 ({daily_pct:.1f}%)")
-        if relative_strength < -1.5: danger_score += w_rel; reasons.append(f"상대적 약세")
-
-        is_tech_bad = False
-        tech_reasons = []
-        if current_price < cloud_bottom: is_tech_bad = True; tech_reasons.append("☁️구름대")
-        if ma20 > 0 and (current_price < ma20) and (ma20 < ma50): is_tech_bad = True; tech_reasons.append("📉역배열")
-        if rsi_val < 30: is_tech_bad = True; tech_reasons.append("과매도")
-        if vol_ratio > 2.0: is_tech_bad = True; tech_reasons.append("거래량")
-
-        if is_tech_bad:
-            danger_score += w_tech
-            reasons.append(f"기술적({','.join(tech_reasons)})")
-
-        if news_score < -0.3:
-            danger_score += 20
-            if worst_news and worst_link:
-                clean_title = worst_news[:20] + "..." if len(worst_news) > 20 else worst_news
-                source_tag = f"[{worst_source}]" if worst_source else "[News]"
-                # ★ [수정] 악재 뉴스에 출처와 제목 표시
-                reasons.append(f"📰 악재: {source_tag} [{clean_title}]({worst_link})")
-            else: reasons.append(f"📰 악재 뉴스 감지")
+        if daily_pct < -3.0: score += params['crash']; reasons.append(f"📉 폭락 ({daily_pct:.1f}%)")
+        if rel_strength < -1.5: score += params['rel']; reasons.append("상대적 약세")
+        
+        tech_bad = []
+        if current_price < cloud_bottom: tech_bad.append("구름대 이탈")
+        if ma20 < ma50 and current_price < ma20: tech_bad.append("데드크로스")
+        if rsi < 30: tech_bad.append("과매도")
+        if vol_ratio > 2.0 and daily_pct < 0: tech_bad.append("투매 거래량")
+        
+        if tech_bad:
+            score += params['tech']
+            reasons.append(f"기술적({','.join(tech_bad)})")
             
-        danger_score = max(0, min(danger_score, 100))
+        if news_score < -0.3:
+            score += 20
+            src = f"[{worst_s}]" if worst_s else ""
+            reasons.append(f"📰 악재: {src} {worst_n[:15]}...")
 
-        return {"ticker": ticker, "price": current_price, "change": daily_pct, "score": danger_score, "threshold": th_sell, "reasons": reasons}
+        score = max(0, min(score, 100))
+        return {"ticker": ticker, "price": current_price, "change": daily_pct, "score": score, "threshold": params['sell'], "reasons": reasons}
 
     def analyze_danger(self):
         dfs = self.get_market_data()
-        if not dfs or 'MACRO' not in dfs or dfs['MACRO'].empty: return
-        df = dfs['MACRO']
-        if len(df) < 30: return 
-
-        now_kst = datetime.now() + timedelta(hours=9)
-        weekday = now_kst.weekday() 
-        hour = now_kst.hour
-        is_weekend_mode = False
-        if weekday == 6: is_weekend_mode = True
-        elif weekday == 5 and hour >= 9: is_weekend_mode = True
-        elif weekday == 0 and hour < 8: is_weekend_mode = True
-
-        live_btc = self.get_realtime_price('BTC-USD')
-        current_btc = live_btc if live_btc else df['BTC'].iloc[-1]
-        idx_day = -24 if len(df) >= 24 else 0
-        btc_chg = (current_btc - df['BTC'].iloc[idx_day]) / df['BTC'].iloc[idx_day] * 100
-        news_score, worst_title, worst_link, worst_source = self.get_news_sentiment(self.macro_keywords)
-
-        if is_weekend_mode:
-            btc_emoji = "🔥 급등" if btc_chg > 3 else "📉 급락" if btc_chg < -3 else "➡️ 횡보"
-            news_emoji = "😊 호재/중립" if news_score >= -0.2 else "🚨 악재 우세"
-            msg = f"☕ *주말 시장 핵심 브리핑*\n📅 {now_kst.strftime('%Y-%m-%d %H:%M')} (KST)\n\n*1️⃣ 비트코인 (24h Live)*\n• 가격 : ${current_btc:,.0f} ({btc_chg:+.2f}%)\n• 추세 : {btc_emoji}\n\n*2️⃣ 주말 주요 뉴스*\n• 심리점수 : {news_score:.2f} ({news_emoji})\n"
-            if worst_title and news_score < -0.2:
-                clean_title = re.sub(r'[\[\]\*\_]', '', worst_title)
-                source_tag = f"[{worst_source}]" if worst_source else "[News]"
-                msg += f"  └ 🗞 {source_tag} [{clean_title[:20]}...]({worst_link})\n"
-            elif news_score >= -0.2: msg += "  └ 특이사항 없는 평온한 주말입니다.\n"
-            self.send_telegram(msg)
+        if not dfs or 'MACRO' not in dfs: 
+            print("데이터 수집 실패")
             return
-
-        nq_chart = self.get_realtime_chart('NQ=F')
-        ma20, ma50, ma120 = 0, 0, 0
-        ma20_prev, ma50_prev, ma120_prev = 0, 0, 0
-        slope20_down, slope50_down = False, False
+        df = dfs['MACRO']
         
-        if nq_chart is not None and not nq_chart.empty and len(nq_chart) > 30:
-            ichimoku = IchimokuIndicator(high=nq_chart['High'], low=nq_chart['Low'], window1=9, window2=26, window3=52)
-            span_a = ichimoku.ichimoku_a().iloc[-26]
-            span_b = ichimoku.ichimoku_b().iloc[-26]
-            try:
-                sma20 = SMAIndicator(close=nq_chart['Close'], window=20).sma_indicator()
-                sma50 = SMAIndicator(close=nq_chart['Close'], window=50).sma_indicator()
-                sma120 = SMAIndicator(close=nq_chart['Close'], window=120).sma_indicator()
-                ma20 = sma20.iloc[-1]; ma50 = sma50.iloc[-1]; ma120 = sma120.iloc[-1]
-                ma20_prev = sma20.iloc[-2]; ma50_prev = sma50.iloc[-2]; ma120_prev = sma120.iloc[-2]
-                slope20_down = ma20 < ma20_prev; slope50_down = ma50 < ma50_prev
-            except: pass
-            current_close = nq_chart['Close'].iloc[-1]
-            live_price = self.get_realtime_price('NQ=F')
-            if live_price: current_close = live_price
-        else:
-            ichimoku = IchimokuIndicator(high=df['High'], low=df['Low'], window1=9, window2=26, window3=52)
-            span_a = ichimoku.ichimoku_a().iloc[-26]; span_b = ichimoku.ichimoku_b().iloc[-26]
-            try:
-                sma20 = SMAIndicator(close=df['Close'], window=20).sma_indicator()
-                sma50 = SMAIndicator(close=df['Close'], window=50).sma_indicator()
-                sma120 = SMAIndicator(close=df['Close'], window=120).sma_indicator()
-                ma20 = sma20.iloc[-1]; ma50 = sma50.iloc[-1]; ma120 = sma120.iloc[-1]
-                ma20_prev = sma20.iloc[-2]; ma50_prev = sma50.iloc[-2]; ma120_prev = sma120.iloc[-2]
-                slope20_down = ma20 < ma20_prev; slope50_down = ma50 < ma50_prev
-            except: pass
-            current_close = self.get_realtime_price('NQ=F') or df['Close'].iloc[-1]
-
-        cloud_top = max(span_a, span_b)
-        cloud_bottom = min(span_a, span_b)
-        cloud_height = cloud_top - cloud_bottom
+        now = datetime.now() + timedelta(hours=9) # KST
         
-        df['Vol_MA20'] = df['Volume'].rolling(window=20).mean()
-        rsi_val = RSIIndicator(close=df['Close'], window=14).rsi().iloc[-1]
-        idx_hour = -2 if len(df) >= 2 else 0
-        daily_chg = (current_close - df['Close'].iloc[idx_day]) / df['Close'].iloc[idx_day] * 100 
-        hourly_chg = (current_close - df['Close'].iloc[idx_hour]) / df['Close'].iloc[idx_hour] * 100
-        avg_vol = df['Vol_MA20'].iloc[-1]; current_vol = df['Volume'].iloc[-1]
-        vol_ratio = 0 if avg_vol == 0 else current_vol / avg_vol
+        # 기본 데이터
+        curr_close = df['Close'].iloc[-1]
+        idx_day = -24 if len(df) >= 24 else 0
+        daily_chg = (curr_close - df['Close'].iloc[idx_day]) / df['Close'].iloc[idx_day] * 100
         
-        current_dxy = self.get_realtime_price('DX-Y.NYB') or df['DXY'].iloc[-1]
-        dxy_chg = (current_dxy - df['DXY'].iloc[idx_day]) / df['DXY'].iloc[idx_day] * 100
-        current_tnx = self.get_realtime_price('^TNX') or df['TNX'].iloc[-1]
-        current_irx = self.get_realtime_price('^IRX') or df['IRX'].iloc[-1]
-        yield_spread = current_tnx - current_irx
-        irx_chg = (current_irx - df['IRX'].iloc[idx_day]) / df['IRX'].iloc[idx_day] * 100
-        nq_ret = current_close / df['Close'].iloc[-5] - 1
-        soxx_ret = df['SOXX'].iloc[-1] / df['SOXX'].iloc[-5] - 1
-        semi_weakness = nq_ret - soxx_ret 
-        hyg_high = df['HYG'].max()
-        current_hyg = self.get_realtime_price('HYG') or df['HYG'].iloc[-1]
-        hyg_drawdown = (current_hyg - hyg_high) / hyg_high * 100
-        current_vix = self.get_realtime_price('^VIX') or df['VIX'].iloc[-1]
-        vix_trend = current_vix - df['VIX'].rolling(window=5).mean().iloc[-1]
-        fund_data = self.get_fundamental_data()
-
+        # [신규] 고급 매크로 분석
+        vix = df['VIX'].iloc[-1]
+        vix3m = df['VIX3M'].iloc[-1] if 'VIX3M' in df.columns else vix * 1.1
+        # VIX 백워데이션 (단기 공포 > 중기 공포) = 폭락 전조
+        is_backwardation = vix > (vix3m * 1.02)
+        vix_ratio = vix / vix3m
+        
+        # 뉴스 분석
+        news_score, w_title, w_link, w_src = self.get_news_sentiment(self.macro_keywords)
+        
+        # 위험 점수 계산
         danger_score = 0
         reasons = []
-        if daily_chg < -1.5: danger_score += W_TREND_MACRO; reasons.append(f"📉 추세 하락 ({daily_chg:.2f}%)")
-        if hourly_chg < -0.8: danger_score += W_VOL_MACRO; reasons.append(f"⚡ 1시간 투매 ({hourly_chg:.2f}%)")
         
-        cloud_status_text = "구름대 위 ✅"
-        if current_close < cloud_bottom:
-            danger_score += W_TREND_MACRO
-            reasons.append("☁️ 구름대 하단 완전 이탈")
-            cloud_status_text = "하단 이탈 (매도) 🚨"
-        elif current_close > cloud_top: cloud_status_text = "구름대 위 (안정) ✅"
-        else:
-            if cloud_height > 0:
-                pos = (current_close - cloud_bottom) / cloud_height
-                if pos < 0.33:
-                    danger_score += int(W_TREND_MACRO/2)
-                    reasons.append("☁️ 구름대 하단 위협")
-                    cloud_status_text = "구름대 하단 (불안) ⚡"
-                elif pos > 0.66: cloud_status_text = "구름대 상단 (조정) 🌤️"
-                else: cloud_status_text = "구름대 중앙 (혼조) 🌫"
-            else: cloud_status_text = "구름대 내부 (혼조) 🌫"
-            
-        ma_status_text = "정배열 ✅"
-        if ma20 > 0:
-            if current_close < ma20 < ma50 < ma120:
-                if slope20_down and slope50_down: danger_score += W_TREND_MACRO; reasons.append("📉 역배열(하락가속)"); ma_status_text = "역배열(가속) 🚨"
-                else: danger_score += int(W_TREND_MACRO*0.8); reasons.append("📉 역배열(하락확정)"); ma_status_text = "역배열 ⚠️"
-            elif ma20 < ma50 and current_close < ma20: danger_score += int(W_TREND_MACRO/2); reasons.append("📉 20/50 데드크로스"); ma_status_text = "데드크로스 ⚠️"
-        else: ma_status_text = "N/A"
-            
-        if vol_ratio > 1.5: danger_score += W_VOL_MACRO; reasons.append(f"📢 거래량 폭증 ({vol_ratio:.1f}배)")
-        if dxy_chg > 0.3: danger_score += W_MACRO_MACRO; reasons.append(f"💵 달러 강세 (+{dxy_chg:.2f}%)")
-        if irx_chg > 2.0: danger_score += W_MACRO_MACRO; reasons.append(f"🏦 단기금리 급등 (+{irx_chg:.1f}%)")
-        if btc_chg < -3.0: danger_score += W_VOL_MACRO; reasons.append(f"📉 비트코인 급락 ({btc_chg:.2f}%)")
-        if semi_weakness > 0.005: danger_score += W_MACRO_MACRO; reasons.append(f"📉 반도체 약세")
-        if hyg_drawdown < -0.3: danger_score += W_MACRO_MACRO; reasons.append(f"💸 스마트머니 이탈 ({hyg_drawdown:.2f}%)")
-        if vix_trend > 0.5: danger_score += W_VOL_MACRO; reasons.append(f"😱 공포확산 (VIX)")
-        if fund_data and fund_data['is_recession']: danger_score += W_TREND_MACRO; reasons.append(f"🛑 샴의 법칙 발동 (침체)")
-        if news_score < -0.2: danger_score += W_VOL_MACRO; reasons.append(f"📰 뉴스 심리 악화 ({news_score:.2f})")
+        # 1. 추세
+        if daily_chg < -1.5: danger_score += W_TREND_MACRO; reasons.append(f"📉 지수 급락 ({daily_chg:.2f}%)")
         
-        if ma120 > 0 and current_close > ma120: danger_score -= 15
+        # 2. VIX 구조 (핵심 업그레이드)
+        if is_backwardation:
+            danger_score += 25
+            reasons.append(f"🚨 VIX 백워데이션 (공포확산 {vix_ratio:.2f}배)")
+        elif vix > 30:
+            danger_score += 15
+            reasons.append(f"😱 공포지수 위험권 ({vix:.1f})")
+            
+        # 3. 매크로
+        dxy_chg = (df['DXY'].iloc[-1] - df['DXY'].iloc[idx_day]) / df['DXY'].iloc[idx_day] * 100
+        if dxy_chg > 0.3: danger_score += W_MACRO_MACRO; reasons.append("💵 달러 급등")
+        
+        tnx = df['TNX'].iloc[-1]
+        irx = df['IRX'].iloc[-1]
+        spread = tnx - irx
+        if spread < -0.5: danger_score += 10; reasons.append("⚠️ 장단기 금리차 역전 심화")
+        
+        # 4. 심리/뉴스
+        if news_score < -0.25: 
+            danger_score += W_VOL_MACRO
+            reasons.append(f"📰 뉴스 심리 악화 ({news_score:.2f})")
+            
+        # 5. 기술적 (이평선)
+        ma20 = df['Close'].rolling(20).mean().iloc[-1]
+        ma50 = df['Close'].rolling(50).mean().iloc[-1]
+        if ma20 < ma50 and curr_close < ma20:
+            danger_score += 15
+            reasons.append("📉 완전 역배열 진입")
+
+        # 샴의 법칙
+        fund = self.get_fundamental_data()
+        if fund and fund['is_recession']:
+            danger_score += 30
+            reasons.append(f"🛑 경기 침체 신호 (샴의 법칙)")
+
         danger_score = max(0, min(danger_score, 100))
-
+        
+        # 상태 결정
+        status = "🟢 안정"
+        if danger_score >= TH_SELL: status = "🔴 위험 (현금화 권장)"
+        elif danger_score >= TH_BUY: status = "🟡 주의 (관망)"
+        
+        # 개별 종목 분석
         stock_results = []
-        for ticker in TARGET_STOCKS.keys():
-            if ticker in dfs:
-                res = self.analyze_individual(ticker, dfs[ticker], df)
+        for t in TARGET_STOCKS:
+            if t in dfs:
+                res = self.analyze_individual(t, dfs[t], df)
                 if res: stock_results.append(res)
-
-        status_emoji = '🟢 안정'
-        if danger_score >= TH_SELL: status_emoji = '🔴 위험 (매도)'
-        elif danger_score >= TH_BUY: status_emoji = '🟡 주의 (관망)'
-        else:
-            if (ma_status_text != "정배열 ✅" and ma_status_text != "N/A") or current_close < cloud_bottom:
-                status_emoji = '🟡 주의 (하락추세)'
-
-        spread_str = "정상 ✅" if yield_spread >= 0 else "역전(침체) ⚠️"
-        semi_str = "약세 ⚠️" if semi_weakness > 0.005 else "양호 ✅"
-        hyg_str = "이탈 ⚠️" if hyg_drawdown < -0.3 else "유입 ✅"
-        vix_str = "확산 ↗" if vix_trend > 0 else "안정 ↘"
-        fund_str = f"실업률 {fund_data['unrate']}%" if fund_data else "N/A"
-        
-        arrow20 = "↗" if ma20 > ma20_prev else "↘"
-        arrow50 = "↗" if ma50 > ma50_prev else "↘"
-        arrow120 = "↗" if ma120 > ma120_prev else "↘"
-        str_ma20 = f"{ma20:,.0f}" if ma20 > 0 else "N/A"
-        str_ma50 = f"{ma50:,.0f}" if ma50 > 0 else "N/A"
-        str_ma120 = f"{ma120:,.0f}" if ma120 > 0 else "N/A"
-        
-        msg = f"🔔 *AI 퀀트 시장 정밀 분석*\n📅 {now_kst.strftime('%Y-%m-%d %H:%M')} (KST)\n🚦 종합상태: {status_emoji} ({danger_score}점)\n\n"
-        msg += f"*1️⃣ 매크로 & 펀더멘털*\n• 경제: {fund_str}\n• 달러: {current_dxy:.2f} ({dxy_chg:+.2f}%)\n• 금리: 10Y {current_tnx:.2f}% / 3M {current_irx:.2f}%\n• 장단기차: {yield_spread:.2f}p ({spread_str})\n\n"
-        msg += f"*2️⃣ 기술적 지표 (Technical)*\n• 나스닥: {current_close:,.2f} ({daily_chg:+.2f}%)\n• 1시간봉: {hourly_chg:+.2f}% / 거래 {int(vol_ratio*100)}%\n• 구름대: {cloud_status_text}\n• 이평선: {ma_status_text}\n   └ 20선 {str_ma20}{arrow20} / 50선 {str_ma50}{arrow50} / 120선 {str_ma120}{arrow120}\n• RSI(14): {rsi_val:.1f}\n\n"
-        msg += f"*3️⃣ 리스크 & 심리*\n• 비트코인: ${current_btc:,.0f} ({btc_chg:+.2f}%)\n• 반도체: {semi_str}\n• 하이일드: {hyg_str}\n• 공포지수: {current_vix:.2f} ({vix_str})\n• 뉴스점수: {news_score:.2f}\n"
-        
-        if worst_title and news_score < -0.2:
-            clean_title = re.sub(r'[\[\]\*\_]', '', worst_title)
-            source_tag = f"[{worst_source}]" if worst_source else "[News]"
-            msg += f"  └ 🗞 {source_tag} [{clean_title[:20]}...]({worst_link})\n"
-            
-        msg += "\n*📋 [상세 위험 요인 분석]*\n"
-        if reasons: msg += "\n".join(["🚨 " + r for r in reasons])
-        else: msg += "✅ 특이사항 없음 (안정적)"
-
-        msg += "\n\n───────────────\n*📊 종목별 위험도 (현재가/등락률)*\n"
         stock_results.sort(key=lambda x: x['score'], reverse=True)
-        for item in stock_results:
-            icon = "🔴" if item['score'] >= item['threshold'] else "🟡" if item['score'] >= item['threshold'] * 0.6 else "🟢"
-            price_info = f"${item['price']:,.2f} ({item['change']:+.2f}%)"
-            msg += f"{icon} *{item['ticker']}*: {price_info} | {item['score']}점\n"
-            if item['score'] >= item['threshold'] * 0.5:
-                reason_str = ", ".join(item['reasons']) if item['reasons'] else ""
-                msg += f"  └ {reason_str}\n"
+
+        # 메시지 작성
+        msg = f"🔔 *AI 마켓 워치 (Advanced)*\n📅 {now.strftime('%Y-%m-%d %H:%M')} (KST)\n🚦 시장상태: {status} ({danger_score}점)\n\n"
         
-        if hour == 5 or hour == 6:
-             trend_summary = self.get_session_summary()
-             msg += f"\n\n🌙 *[밤사이 시장 요약]*\n{trend_summary}"
+        msg += "*1️⃣ 핵심 위험 요인*\n"
+        if reasons: msg += "\n".join(["▪ " + r for r in reasons])
+        else: msg += "▪ 특이사항 없음 (양호)"
+        
+        msg += f"\n\n*2️⃣ 매크로 대시보드*\n• 나스닥: {curr_close:,.0f} ({daily_chg:+.2f}%)\n• VIX구조: {'⚠️ 역전' if is_backwardation else '✅ 정상'} ({vix:.1f}/{vix3m:.1f})\n• 달러: {df['DXY'].iloc[-1]:.2f}\n• 금리차: {spread:.2f}p\n"
+        
+        if fund: msg += f"• 실업률: {fund['unrate']}%\n"
+        
+        if w_title:
+            cl_title = re.sub(r'[\[\]\*\_]', '', w_title)[:25] + "..."
+            src_tag = f"[{w_src}]" if w_src else "[News]"
+            msg += f"\n*3️⃣ 주요 뉴스 심리*\n• 점수: {news_score:.2f}\n• 이슈: {src_tag} [{cl_title}]({w_link})\n"
+            
+        msg += "\n*📊 관심 종목 위험도*\n"
+        for s in stock_results:
+            icon = "🔴" if s['score'] >= s['threshold'] else "🟡" if s['score'] >= 40 else "🟢"
+            msg += f"{icon} {s['ticker']}: {s['score']}점 ({s['change']:+.1f}%)\n"
+            if s['reasons']: msg += f"  └ {', '.join(s['reasons'])}\n"
 
         self.send_telegram(msg)
 
