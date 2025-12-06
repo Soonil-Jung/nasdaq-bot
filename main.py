@@ -50,7 +50,7 @@ TH_BUY = 40
 
 class DangerAlertBot:
     def __init__(self):
-        print("🤖 AI 퀀트 시스템(News Summary Ver.) 가동 중...")
+        print("🤖 AI 퀀트 시스템(Full Text Ver.) 가동 중...")
         try:
             self.tokenizer = BertTokenizer.from_pretrained('ProsusAI/finbert')
             self.model = BertForSequenceClassification.from_pretrained('ProsusAI/finbert')
@@ -75,7 +75,7 @@ class DangerAlertBot:
         except Exception as e: print(f"텔레그램 전송 실패: {e}")
 
     # ------------------------------------------------------------------
-    # [뉴스 분석 엔진] 요약 기능 추가
+    # [뉴스 분석 엔진] Full Text 반영 수정
     # ------------------------------------------------------------------
     async def fetch_feed(self, session, keyword):
         url = f"https://news.google.com/rss/search?q={keyword}&hl=en-US&gl=US&ceid=US:en"
@@ -93,7 +93,6 @@ class DangerAlertBot:
         search_list = [keywords] if isinstance(keywords, str) else keywords
         total_score = 0
         count = 0
-        # worst_info 구조에 summary 추가
         worst_info = {"score": 1.0, "title": "", "link": "", "source": "", "summary": ""}
 
         async with aiohttp.ClientSession() as session:
@@ -110,13 +109,10 @@ class DangerAlertBot:
                         link = entry.link
                         source = entry.source.title if 'source' in entry else "News"
                         
-                        # [추가] 요약문 추출 및 HTML 태그 제거
+                        # [수정됨] 길이 제한 없이 전체 텍스트 가져오기
                         raw_summary = entry.get('summary', '') or entry.get('description', '')
-                        clean_summary = BeautifulSoup(raw_summary, "html.parser").get_text()
-                        # 너무 길면 자르기 (가독성)
-                        if len(clean_summary) > 150:
-                            clean_summary = clean_summary[:150] + "..."
-
+                        clean_summary = BeautifulSoup(raw_summary, "html.parser").get_text().strip()
+                        
                         clean_title = BeautifulSoup(title, "html.parser").get_text()
                         res = self.nlp(clean_title[:512])[0]
                         
@@ -133,12 +129,11 @@ class DangerAlertBot:
                                 "title": clean_title,
                                 "link": link,
                                 "source": source,
-                                "summary": clean_summary # 요약 저장
+                                "summary": clean_summary
                             }
                     except: continue
         
         avg_score = total_score / count if count > 0 else 0
-        # 리턴값에 summary 추가
         return avg_score, worst_info["title"], worst_info["link"], worst_info["source"], worst_info["summary"]
 
     def get_news_sentiment(self, target_keywords):
@@ -238,7 +233,6 @@ class DangerAlertBot:
         nq_chg = (df_macro['Close'].iloc[-1] - df_macro['Close'].iloc[-8]) / df_macro['Close'].iloc[-8] * 100
         rel_strength = daily_pct - nq_chg
 
-        # 뉴스 분석 (요약 포함 반환값 받기)
         news_score, worst_n, worst_l, worst_s, worst_sum = self.get_news_sentiment(ticker)
 
         score = 0
@@ -260,10 +254,9 @@ class DangerAlertBot:
         if news_score < -0.3:
             score += 20
             src = f"[{worst_s}]" if worst_s else ""
-            # 요약 내용이 있으면 추가
             news_msg = f"📰 악재: {src} {worst_n[:20]}..."
-            if worst_sum:
-                news_msg += f"\n    └ {worst_sum[:60]}..."
+            # [수정] 요약문 길이 제한 없이 출력
+            if worst_sum: news_msg += f"\n    └ {worst_sum}"
             reasons.append(news_msg)
 
         score = max(0, min(score, 100))
@@ -278,17 +271,48 @@ class DangerAlertBot:
         
         now = datetime.now() + timedelta(hours=9)
         
-        curr_close = df['Close'].iloc[-1]
+        weekday = now.weekday()
+        hour = now.hour
+        is_weekend_mode = False
+        if weekday == 6: is_weekend_mode = True
+        elif weekday == 5 and hour >= 9: is_weekend_mode = True
+        elif weekday == 0 and hour < 8: is_weekend_mode = True
+
+        live_btc = self.get_realtime_price('BTC-USD')
+        curr_btc = live_btc if live_btc else df['BTC'].iloc[-1]
         idx_day = -24 if len(df) >= 24 else 0
+        btc_prev = df['BTC'].iloc[idx_day]
+        btc_chg = (curr_btc - btc_prev) / btc_prev * 100 if btc_prev else 0
+        
+        news_score, w_title, w_link, w_src, w_sum = self.get_news_sentiment(self.macro_keywords)
+
+        if is_weekend_mode:
+            btc_emoji = "🔥 급등" if btc_chg > 3 else "📉 급락" if btc_chg < -3 else "➡️ 횡보"
+            news_emoji = "😊 호재/중립" if news_score >= -0.2 else "🚨 악재 우세"
+            
+            msg = f"☕ *주말 시장 핵심 브리핑*\n📅 {now.strftime('%Y-%m-%d %H:%M')} (KST)\n\n"
+            msg += f"*1️⃣ 비트코인 (24h Live)*\n• 가격 : ${curr_btc:,.0f} ({btc_chg:+.2f}%)\n• 추세 : {btc_emoji}\n\n"
+            msg += f"*2️⃣ 주말 주요 뉴스*\n• 심리점수 : {news_score:.2f} ({news_emoji})\n"
+            
+            if w_title and news_score < -0.2:
+                cl_title = re.sub(r'[\[\]\*\_]', '', w_title)[:30] + "..."
+                src_tag = f"[{w_src}]" if w_src else "[News]"
+                msg += f"  └ 🗞 {src_tag} [{cl_title}]({w_link})\n"
+                # [수정] 주말 브리핑에서도 요약문 전체 출력
+                if w_sum: msg += f"    📝 {w_sum}\n"
+            elif news_score >= -0.2:
+                msg += "  └ 특이사항 없는 평온한 주말입니다.\n"
+                
+            self.send_telegram(msg)
+            return
+
+        curr_close = df['Close'].iloc[-1]
         daily_chg = (curr_close - df['Close'].iloc[idx_day]) / df['Close'].iloc[idx_day] * 100
         
         vix = df['VIX'].iloc[-1]
         vix3m = df['VIX3M'].iloc[-1] if 'VIX3M' in df.columns else vix * 1.1
         is_backwardation = vix > (vix3m * 1.02)
         vix_ratio = vix / vix3m
-        
-        # 뉴스 분석 (요약 포함)
-        news_score, w_title, w_link, w_src, w_sum = self.get_news_sentiment(self.macro_keywords)
         
         danger_score = 0
         reasons = []
@@ -338,7 +362,7 @@ class DangerAlertBot:
                 if res: stock_results.append(res)
         stock_results.sort(key=lambda x: x['score'], reverse=True)
 
-        msg = f"🔔 *AI 마켓 워치 (News Summary)*\n📅 {now.strftime('%Y-%m-%d %H:%M')} (KST)\n🚦 시장상태: {status} ({danger_score}점)\n\n"
+        msg = f"🔔 *AI 마켓 워치 (Pro)*\n📅 {now.strftime('%Y-%m-%d %H:%M')} (KST)\n🚦 시장상태: {status} ({danger_score}점)\n\n"
         
         msg += "*1️⃣ 핵심 위험 요인*\n"
         if reasons: msg += "\n".join(["▪ " + r for r in reasons])
@@ -352,9 +376,8 @@ class DangerAlertBot:
             cl_title = re.sub(r'[\[\]\*\_]', '', w_title)[:25] + "..."
             src_tag = f"[{w_src}]" if w_src else "[News]"
             msg += f"\n*3️⃣ 주요 뉴스 심리*\n• 점수: {news_score:.2f}\n• 이슈: {src_tag} [{cl_title}]({w_link})\n"
-            # [추가] 뉴스 요약 출력
-            if w_sum:
-                msg += f"  └ 📝 요약: {w_sum}\n"
+            # [수정] 요약문 전체 출력
+            if w_sum: msg += f"  └ 📝 {w_sum}\n"
             
         msg += "\n*📊 관심 종목 위험도*\n"
         for s in stock_results:
