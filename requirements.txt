@@ -2,9 +2,10 @@ yfinance
 pandas
 numpy
 requests
+pandas-datareader
 ta
 transformers
 torch
-GoogleNews
-newspaper3k
-pandas-datareader
+beautifulsoup4
+feedparser
+aiohttp
