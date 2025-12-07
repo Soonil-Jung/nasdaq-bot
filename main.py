@@ -49,7 +49,7 @@ TH_BUY = 30
 
 class DangerAlertBot:
     def __init__(self):
-        print("🤖 AI 퀀트 시스템(Real Final) 가동 중...")
+        print("🤖 AI 퀀트 시스템(Real Final Fixed) 가동 중...")
         try:
             self.tokenizer = BertTokenizer.from_pretrained('ProsusAI/finbert')
             self.model = BertForSequenceClassification.from_pretrained('ProsusAI/finbert')
@@ -122,7 +122,6 @@ class DangerAlertBot:
 
     def get_market_data(self):
         try:
-            # Drawdown 계산을 위해 1년(1y) 데이터 필수
             macro_tickers = ['NQ=F', 'QQQ', '^VIX', '^VIX3M', 'DX-Y.NYB', 'SOXX', 'HYG', '^TNX', '^IRX', 'BTC-USD']
             all_tickers = macro_tickers + list(TARGET_STOCKS.keys())
             data = yf.download(all_tickers, period='1y', interval='1d', prepost=True, progress=False, ignore_tz=True)
@@ -225,7 +224,7 @@ class DangerAlertBot:
             msg += f"*2️⃣ 주말 주요 뉴스*\n• 심리점수 : {news_score:.2f} ({news_emoji})\n"
             if w_title and news_score < -0.2:
                 cl_title = re.sub(r'[\[\]\*\_]', '', w_title)[:30] + "..."
-                msg += f"  └ 🗞 {src_tag} [{cl_title}]({w_link})\n"
+                msg += f"  └ 🗞 [{w_src}] [{cl_title}]({w_link})\n"
                 if w_sum: msg += f"    📝 {w_sum}\n"
             self.send_telegram(msg)
             return
@@ -235,11 +234,10 @@ class DangerAlertBot:
         prev = df['Close'].iloc[-2]
         chg = (curr - prev) / prev * 100
         
-        # [복구됨] 1. 고점 대비 하락률 (Drawdown)
+        # [누락되었던 로직 복구] 52주 고점 대비 하락률 (Drawdown)
         high_52w = df['Close'].rolling(252).max().iloc[-1]
         drawdown = (curr - high_52w) / high_52w * 100
         
-        # 2. 이동평균선
         ma20 = df['Close'].rolling(20).mean().iloc[-1]
         ma50 = df['Close'].rolling(50).mean().iloc[-1]
         ma120 = df['Close'].rolling(120).mean().iloc[-1]
@@ -250,10 +248,10 @@ class DangerAlertBot:
         danger_score = 0
         reasons = []
         
-        # A. 추세 및 누적 하락
+        # A. 추세 악화
         if chg < -1.5: danger_score += W_TREND_MACRO; reasons.append(f"📉 지수 급락 ({chg:.2f}%)")
         
-        # [복구됨] Drawdown 반영 로직
+        # [누락되었던 로직 복구] Drawdown 점수 반영
         if drawdown < -20: danger_score += 30; reasons.append(f"📉 폭락장 지속 (고점대비 {drawdown:.1f}%)")
         elif drawdown < -10: danger_score += 15; reasons.append(f"📉 조정장 진입 (고점대비 {drawdown:.1f}%)")
         
@@ -294,7 +292,8 @@ class DangerAlertBot:
                 if res: stock_results.append(res)
         stock_results.sort(key=lambda x: x['score'], reverse=True)
 
-        msg = f"🔔 *AI 마켓 워치 (Final)*\n📅 {now.strftime('%Y-%m-%d %H:%M')} (KST)\n🚦 시장상태: {status} ({danger_score}점)\n\n"
+        msg = f"🔔 *AI 마켓 워치 (Final Fixed)*\n📅 {now.strftime('%Y-%m-%d %H:%M')} (KST)\n🚦 시장상태: {status} ({danger_score}점)\n\n"
+        
         msg += "*1️⃣ 핵심 위험 요인*\n"
         if reasons: msg += "\n".join(["▪ " + r for r in reasons])
         else: msg += "▪ 특이사항 없음 (양호)"
