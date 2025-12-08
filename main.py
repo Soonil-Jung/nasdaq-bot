@@ -40,17 +40,16 @@ STOCK_PARAMS = {
     'AAPL':  {'crash': 20, 'rel': 20, 'tech': 20, 'sell': 60}
 }
 
-# [가중치 미세 조정] 변수가 늘어났으므로 밸런스 조정
-W_TREND_MACRO = 35 # 기존 40 -> 35
+W_TREND_MACRO = 35 
 W_VOL_MACRO = 20
-W_MACRO_MACRO = 10 # 기존 15 -> 10 (항목이 많아져서 분산)
+W_MACRO_MACRO = 10 
 TH_SELL = 60
 TH_BUY = 30
 # ======================================================
 
 class DangerAlertBot:
     def __init__(self):
-        print("🤖 AI 퀀트 시스템(Perfect Ver.) 가동 중...")
+        print("🤖 AI 퀀트 시스템(Dashboard+ Ver.) 가동 중...")
         try:
             self.tokenizer = BertTokenizer.from_pretrained('ProsusAI/finbert')
             self.model = BertForSequenceClassification.from_pretrained('ProsusAI/finbert')
@@ -210,7 +209,6 @@ class DangerAlertBot:
         hour = now.hour
         is_weekend = (weekday == 6) or (weekday == 5 and hour >= 9) or (weekday == 0 and hour < 8)
 
-        # BTC 데이터 준비
         live_btc = self.get_realtime_price('BTC-USD')
         curr_btc = live_btc if live_btc else df['BTC'].iloc[-1]
         btc_prev = df['BTC'].iloc[-2]
@@ -231,7 +229,7 @@ class DangerAlertBot:
             self.send_telegram(msg)
             return
 
-        # [평일 분석 - 모든 변수 체크]
+        # [평일 분석]
         curr = df['Close'].iloc[-1]
         prev = df['Close'].iloc[-2]
         chg = (curr - prev) / prev * 100
@@ -246,28 +244,26 @@ class DangerAlertBot:
         vix = df['VIX'].iloc[-1]
         vix3m = df['VIX3M'].iloc[-1] if 'VIX3M' in df.columns else vix * 1.1
         
-        # [누락되었던 SOXX 변수 복원]
         soxx = df['SOXX'].iloc[-1]
         soxx_chg = (soxx - df['SOXX'].iloc[-2]) / df['SOXX'].iloc[-2] * 100
-        
-        # [누락되었던 HYG 변수 복원]
         hyg = df['HYG'].iloc[-1]
         hyg_chg = (hyg - df['HYG'].iloc[-2]) / df['HYG'].iloc[-2] * 100
         
         danger_score = 0
         reasons = []
         
-        # 1. 추세 (나스닥)
-        if chg < -1.5: danger_score += W_TREND_MACRO; reasons.append(f"📉 나스닥 급락 ({chg:.2f}%)")
+        # A. 추세
+        if chg < -1.5: danger_score += W_TREND_MACRO; reasons.append(f"📉 지수 급락 ({chg:.2f}%)")
         if drawdown < -20: danger_score += 30; reasons.append(f"📉 폭락장 지속 (고점대비 {drawdown:.1f}%)")
         elif drawdown < -10: danger_score += 15; reasons.append(f"📉 조정장 진입 (고점대비 {drawdown:.1f}%)")
         
-        # 2. 공포 (VIX)
+        # B. 공포 (VIX)
         if vix > vix3m * 1.02: danger_score += 35; reasons.append(f"🚨 VIX 역전 (시스템 위기)")
         elif vix > 30: danger_score += 20; reasons.append(f"😱 극단적 공포 ({vix:.1f})")
             
-        # 3. 매크로 (달러/금리/채권)
-        dxy_chg = (df['DXY'].iloc[-1] - df['DXY'].iloc[-2]) / df['DXY'].iloc[-2] * 100
+        # C. 매크로
+        dxy = df['DXY'].iloc[-1]
+        dxy_chg = (dxy - df['DXY'].iloc[-2]) / df['DXY'].iloc[-2] * 100
         if dxy_chg > 0.5: danger_score += W_MACRO_MACRO; reasons.append("💵 달러 급등")
         
         tnx = df['TNX'].iloc[-1]
@@ -275,22 +271,15 @@ class DangerAlertBot:
         spread = tnx - irx
         if spread < -0.5: danger_score += 10; reasons.append("⚠️ 금리차 역전 심화")
         
-        # [신규 점수 반영] 하이일드 채권 투매
-        if hyg_chg < -0.5: danger_score += 10; reasons.append("⚠️ 하이일드 자금 이탈")
-        
-        # 4. 심리 (뉴스)
         if news_score < -0.3: danger_score += 15; reasons.append(f"📰 뉴스 심리 악화")
-        
-        # 5. 연관 자산 (비트코인/반도체)
-        # [신규 점수 반영] 비트코인 급락
+            
+        # 자산군 위험
         if btc_chg < -3.0: danger_score += 10; reasons.append(f"📉 비트코인 급락 ({btc_chg:.1f}%)")
-        # [신규 점수 반영] 반도체 약세 (나스닥보다 1%p 이상 더 빠질 때)
-        if soxx_chg < chg - 1.0: danger_score += 10; reasons.append(f"📉 반도체 상대적 약세")
+        if soxx_chg < (chg - 1.0): danger_score += 10; reasons.append(f"📉 반도체 상대적 약세")
+        if hyg_chg < -0.5: danger_score += 10; reasons.append(f"⚠️ 하이일드 자금 이탈")
 
-        # 6. 기술적 역배열
+        # D. 기술적
         if ma20 < ma50 and curr < ma20: danger_score += 25; reasons.append("📉 완전 역배열")
-        
-        # 7. 추세 버퍼 (상승장 보호)
         if curr > ma120: danger_score -= 15
 
         fund = self.get_fundamental_data()
@@ -309,24 +298,35 @@ class DangerAlertBot:
                 if res: stock_results.append(res)
         stock_results.sort(key=lambda x: x['score'], reverse=True)
 
-        msg = f"🔔 *AI 마켓 워치 (Perfect)*\n📅 {now.strftime('%Y-%m-%d %H:%M')} (KST)\n🚦 시장상태: {status} ({danger_score}점)\n\n"
+        # [상태 해석 텍스트 생성]
+        trend_st = "상승(120선 위)✅" if curr > ma120 else "하락(120선 아래)⚠️"
+        vix_st = "역전🚨" if vix > vix3m * 1.02 else "정상✅"
+        spread_st = "역전⚠️" if spread < 0 else "정상✅"
+        recess_st = "침체🛑" if fund and fund['is_recession'] else "정상✅"
+        
+        nq_emoji = "🔥" if chg > 0.5 else "💧" if chg < -0.5 else "➡️"
+        dxy_st = "⚠️악재" if dxy_chg > 0.2 else "✅호재" if dxy_chg < -0.2 else "➡️"
+        btc_st = "🔥RiskOn" if btc_chg > 1 else "💧RiskOff" if btc_chg < -1 else "➡️"
+        soxx_st = "🚀주도" if soxx_chg > chg else "🐢소외"
+        hyg_st = "💰유입" if hyg_chg > 0 else "💸이탈"
+
+        msg = f"🔔 *AI 마켓 워치 (Dashboard+)*\n📅 {now.strftime('%Y-%m-%d %H:%M')} (KST)\n🚦 시장상태: {status} ({danger_score}점)\n\n"
         
         msg += "*1️⃣ 핵심 위험 요인*\n"
         if reasons: msg += "\n".join(["▪ " + r for r in reasons])
         else: msg += "▪ 특이사항 없음 (양호)"
         
-        # [수정] 대시보드에 BTC, SOXX, HYG 모두 포함
-        trend_st = "상승(120선 위)✅" if curr > ma120 else "하락(120선 아래)⚠️"
-        vix_st = "역전🚨" if vix > vix3m * 1.02 else "정상✅"
+        msg += f"\n\n*2️⃣ 매크로 대시보드*\n"
+        msg += f"• 나스닥: {curr:,.0f} ({chg:+.2f}%) {nq_emoji}\n"
+        msg += f"• 추세: {trend_st} | 낙폭: {drawdown:.1f}%\n"
+        msg += f"• VIX구조: {vix_st} ({vix:.1f}/{vix3m:.1f})\n"
+        msg += f"• 달러: {dxy:.2f} ({dxy_chg:+.2f}%) {dxy_st}\n"
+        msg += f"• 금리차: {spread:.2f}p ({spread_st})\n"
+        msg += f"• 비트코인: ${curr_btc:,.0f} ({btc_chg:+.2f}%) {btc_st}\n"
+        msg += f"• 반도체: ${soxx:,.0f} ({soxx_chg:+.2f}%) {soxx_st}\n"
+        msg += f"• 하이일드: ${hyg:.2f} ({hyg_chg:+.2f}%) {hyg_st}\n"
         
-        msg += f"\n\n*2️⃣ 매크로 대시보드*\n• 나스닥: {curr:,.0f} ({chg:+.2f}%)\n• 추세: {trend_st}\n• 낙폭: {drawdown:.1f}% (고점대비)\n"
-        msg += f"• VIX구조: {vix_st} ({vix:.1f}/{vix3m:.1f})\n• 달러: {df['DXY'].iloc[-1]:.2f} ({dxy_chg:+.2f}%)\n"
-        msg += f"• 금리차: {spread:.2f}p\n"
-        msg += f"• 비트코인: ${curr_btc:,.0f} ({btc_chg:+.2f}%)\n"
-        msg += f"• 반도체: ${soxx:,.0f} ({soxx_chg:+.2f}%)\n"
-        msg += f"• 하이일드: ${hyg:.2f} ({hyg_chg:+.2f}%)\n"
-        
-        if fund: msg += f"• 실업률: {fund['unrate']}%\n"
+        if fund: msg += f"• 실업률: {fund['unrate']}% ({recess_st})\n"
         
         if w_title:
             cl_title = re.sub(r'[\[\]\*\_]', '', w_title)[:25] + "..."
