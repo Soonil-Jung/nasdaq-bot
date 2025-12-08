@@ -49,7 +49,7 @@ TH_BUY = 30
 
 class DangerAlertBot:
     def __init__(self):
-        print("🤖 AI 퀀트 시스템(Dashboard+ Ver.) 가동 중...")
+        print("🤖 퀀트봇v2.1 가동 중...")
         try:
             self.tokenizer = BertTokenizer.from_pretrained('ProsusAI/finbert')
             self.model = BertForSequenceClassification.from_pretrained('ProsusAI/finbert')
@@ -229,7 +229,7 @@ class DangerAlertBot:
             self.send_telegram(msg)
             return
 
-        # [평일 분석]
+        # [평일 분석 시작]
         curr = df['Close'].iloc[-1]
         prev = df['Close'].iloc[-2]
         chg = (curr - prev) / prev * 100
@@ -262,8 +262,7 @@ class DangerAlertBot:
         elif vix > 30: danger_score += 20; reasons.append(f"😱 극단적 공포 ({vix:.1f})")
             
         # C. 매크로
-        dxy = df['DXY'].iloc[-1]
-        dxy_chg = (dxy - df['DXY'].iloc[-2]) / df['DXY'].iloc[-2] * 100
+        dxy_chg = (df['DXY'].iloc[-1] - df['DXY'].iloc[-2]) / df['DXY'].iloc[-2] * 100
         if dxy_chg > 0.5: danger_score += W_MACRO_MACRO; reasons.append("💵 달러 급등")
         
         tnx = df['TNX'].iloc[-1]
@@ -278,8 +277,10 @@ class DangerAlertBot:
         if soxx_chg < (chg - 1.0): danger_score += 10; reasons.append(f"📉 반도체 상대적 약세")
         if hyg_chg < -0.5: danger_score += 10; reasons.append(f"⚠️ 하이일드 자금 이탈")
 
-        # D. 기술적
+        # D. 기술적 역배열
         if ma20 < ma50 and curr < ma20: danger_score += 25; reasons.append("📉 완전 역배열")
+        
+        # E. 추세 버퍼 (상승장 보호)
         if curr > ma120: danger_score -= 15
 
         fund = self.get_fundamental_data()
@@ -298,7 +299,7 @@ class DangerAlertBot:
                 if res: stock_results.append(res)
         stock_results.sort(key=lambda x: x['score'], reverse=True)
 
-        # [상태 해석 텍스트 생성]
+        # [메시지 작성 - 상태 텍스트 수정됨]
         trend_st = "상승(120선 위)✅" if curr > ma120 else "하락(120선 아래)⚠️"
         vix_st = "역전🚨" if vix > vix3m * 1.02 else "정상✅"
         spread_st = "역전⚠️" if spread < 0 else "정상✅"
@@ -307,10 +308,17 @@ class DangerAlertBot:
         nq_emoji = "🔥" if chg > 0.5 else "💧" if chg < -0.5 else "➡️"
         dxy_st = "⚠️악재" if dxy_chg > 0.2 else "✅호재" if dxy_chg < -0.2 else "➡️"
         btc_st = "🔥RiskOn" if btc_chg > 1 else "💧RiskOff" if btc_chg < -1 else "➡️"
-        soxx_st = "🚀주도" if soxx_chg > chg else "🐢소외"
-        hyg_st = "💰유입" if hyg_chg > 0 else "💸이탈"
 
-        msg = f"🔔 *AI 마켓 워치 (Dashboard+)*\n📅 {now.strftime('%Y-%m-%d %H:%M')} (KST)\n🚦 시장상태: {status} ({danger_score}점)\n\n"
+        # [수정] 반도체/하이일드 보합 조건 추가
+        if soxx_chg > chg + 0.2: soxx_st = "🚀주도"
+        elif soxx_chg < chg - 0.2: soxx_st = "🐢소외"
+        else: soxx_st = "➡️동행"
+
+        if hyg_chg > 0.05: hyg_st = "💰유입"
+        elif hyg_chg < -0.05: hyg_st = "💸이탈"
+        else: hyg_st = "➡️보합"
+
+        msg = f"🔔 *AI 마켓 워치 (v2.1)*\n📅 {now.strftime('%Y-%m-%d %H:%M')} (KST)\n🚦 시장상태: {status} ({danger_score}점)\n\n"
         
         msg += "*1️⃣ 핵심 위험 요인*\n"
         if reasons: msg += "\n".join(["▪ " + r for r in reasons])
@@ -320,11 +328,11 @@ class DangerAlertBot:
         msg += f"• 나스닥: {curr:,.0f} ({chg:+.2f}%) {nq_emoji}\n"
         msg += f"• 추세: {trend_st} | 낙폭: {drawdown:.1f}%\n"
         msg += f"• VIX구조: {vix_st} ({vix:.1f}/{vix3m:.1f})\n"
-        msg += f"• 달러: {dxy:.2f} ({dxy_chg:+.2f}%) {dxy_st}\n"
+        msg += f"• 달러: {df['DXY'].iloc[-1]:.2f} ({dxy_chg:+.2f}%) {dxy_st}\n"
         msg += f"• 금리차: {spread:.2f}p ({spread_st})\n"
         msg += f"• 비트코인: ${curr_btc:,.0f} ({btc_chg:+.2f}%) {btc_st}\n"
-        msg += f"• 반도체: ${soxx:,.0f} ({soxx_chg:+.2f}%) {soxx_st}\n"
-        msg += f"• 하이일드: ${hyg:.2f} ({hyg_chg:+.2f}%) {hyg_st}\n"
+        msg += f"• 반도체: ${df['SOXX'].iloc[-1]:.0f} ({soxx_chg:+.2f}%) {soxx_st}\n"
+        msg += f"• 하이일드: ${df['HYG'].iloc[-1]:.2f} ({hyg_chg:+.2f}%) {hyg_st}\n"
         
         if fund: msg += f"• 실업률: {fund['unrate']}% ({recess_st})\n"
         
