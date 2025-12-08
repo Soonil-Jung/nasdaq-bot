@@ -16,28 +16,36 @@ from ta.momentum import RSIIndicator
 from transformers import BertTokenizer, BertForSequenceClassification, pipeline
 
 # ======================================================
-# ▼▼▼ 사용자 설정 정보 ▼▼▼
+# ▼▼▼ [STRATEGY UPGRADE] 포트폴리오 리밸런싱 ▼▼▼
+# 설명: 기존 Tech 일변도에서 'AI 전력/인프라' 핵심 종목 편입
+# ======================================================
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
 
 TARGET_STOCKS = {
+    # [Tech Core]
     'GOOGL': 'Google Alphabet',
     'MSFT': 'Microsoft',
-    'TSLA': 'Tesla',
     'NVDA': 'Nvidia',
-    'AMD': 'AMD',
     'PLTR': 'Palantir',
-    'AAPL': 'Apple'
+    # [AI Power & Infra - The New Alpha]
+    'NEE': 'NextEra Energy',   # 재생에너지 대장
+    'CEG': 'Constellation En', # 원자력 대장
+    'ETN': 'Eaton Corp',       # 전력망/변압기
+    'XLU': 'Utilities ETF'     # 유틸리티 섹터 지표
 }
 
+# 종목별 민감도 설정 (유틸리티는 Tech보다 변동성 허용폭을 좁게 설정)
 STOCK_PARAMS = {
     'GOOGL': {'crash': 40, 'rel': 20, 'tech': 20, 'sell': 60},
     'MSFT':  {'crash': 30, 'rel': 10, 'tech': 20, 'sell': 60},
-    'TSLA':  {'crash': 40, 'rel': 10, 'tech': 20, 'sell': 60},
     'NVDA':  {'crash': 40, 'rel': 10, 'tech': 20, 'sell': 60},
-    'AMD':   {'crash': 30, 'rel': 20, 'tech': 10, 'sell': 60},
     'PLTR':  {'crash': 40, 'rel': 15, 'tech': 20, 'sell': 60},
-    'AAPL':  {'crash': 20, 'rel': 20, 'tech': 20, 'sell': 60}
+    # [Defensive Growth] 방어주 성격이 섞인 종목들
+    'NEE':   {'crash': 25, 'rel': 15, 'tech': 20, 'sell': 55},
+    'CEG':   {'crash': 30, 'rel': 20, 'tech': 20, 'sell': 60},
+    'ETN':   {'crash': 30, 'rel': 20, 'tech': 20, 'sell': 60},
+    'XLU':   {'crash': 20, 'rel': 10, 'tech': 10, 'sell': 50}
 }
 
 W_TREND_MACRO = 35 
@@ -47,9 +55,9 @@ TH_SELL = 60
 TH_BUY = 30
 # ======================================================
 
-class DangerAlertBot:
+class MarketStrategyBot:
     def __init__(self):
-        print("🤖 퀀트봇v2.1 가동 중...")
+        print("🏛️ [Wall St. Strategist Bot v3.0] 가동 중... (Sector Rotation Mode)")
         try:
             self.tokenizer = BertTokenizer.from_pretrained('ProsusAI/finbert')
             self.model = BertForSequenceClassification.from_pretrained('ProsusAI/finbert')
@@ -58,10 +66,10 @@ class DangerAlertBot:
             print(f"⚠️ AI 모델 로드 실패: {e}")
             self.nlp = None
         
+        # 키워드 확장: 에너지 및 인프라 관련 키워드 추가
         self.macro_keywords = [
-            'Federal Reserve', 'The Fed', 'Jerome Powell', 'FOMC', 
-            'US CPI Inflation', 'US Recession', 'US Stagflation', 'US Economy',
-            'Nasdaq Crash', 'Wall Street', 'Geopolitical tension'
+            'Federal Reserve', 'Powell', 'US CPI', 'Recession', 
+            'AI Bubble', 'Data Center Energy', 'Power Grid Shortage', 'Nuclear Energy'
         ]
 
     def send_telegram(self, message):
@@ -101,11 +109,17 @@ class DangerAlertBot:
                         raw_sum = entry.get('summary', '') or entry.get('description', '')
                         clean_sum = BeautifulSoup(raw_sum, "html.parser").get_text().strip()
                         clean_title = BeautifulSoup(title, "html.parser").get_text()
-                        res = self.nlp(clean_title[:512])[0]
+                        
+                        # BERT 모델 길이 제한 처리
+                        inputs = clean_title[:512]
+                        res = self.nlp(inputs)[0]
                         score = res['score'] if res['label'] == 'positive' else -res['score']
+                        
                         total_score += score
                         count += 1
-                        if score < worst_info["score"] and score < -0.5:
+                        
+                        # 가장 부정적인 뉴스 포착
+                        if score < worst_info["score"]:
                             worst_info = {"score": score, "title": clean_title, "link": link, "source": source, "summary": clean_sum}
                     except: continue
         
@@ -122,22 +136,32 @@ class DangerAlertBot:
 
     def get_market_data(self):
         try:
+            # QQQ(기술주)와 XLU(유틸리티)를 명시적으로 호출하여 로테이션 분석에 사용
             macro_tickers = ['NQ=F', 'QQQ', '^VIX', '^VIX3M', 'DX-Y.NYB', 'SOXX', 'HYG', '^TNX', '^IRX', 'BTC-USD']
             all_tickers = macro_tickers + list(TARGET_STOCKS.keys())
+            
+            # 중복 제거
+            all_tickers = list(set(all_tickers))
+            
             data = yf.download(all_tickers, period='1y', interval='1d', prepost=True, progress=False, ignore_tz=True)
             
             if isinstance(data.columns, pd.MultiIndex) and 'Close' in data.columns:
                 dfs = {}
                 df_macro = pd.DataFrame()
                 close_data = data['Close']
-                if 'NQ=F' not in close_data.columns: return {}
                 
-                df_macro['Close'] = close_data['NQ=F']
-                df_macro['High'] = data['High']['NQ=F'] if 'High' in data.columns else close_data['NQ=F']
-                df_macro['Low'] = data['Low']['NQ=F'] if 'Low' in data.columns else close_data['NQ=F']
-                df_macro['Volume'] = data['Volume']['QQQ'] if 'Volume' in data.columns else 0
-                
-                ticker_map = {'^VIX': 'VIX', '^VIX3M': 'VIX3M', 'DX-Y.NYB': 'DXY', 'SOXX': 'SOXX', 'HYG': 'HYG', '^TNX': 'TNX', '^IRX': 'IRX', 'BTC-USD': 'BTC'}
+                # 매크로 기본 데이터
+                if 'NQ=F' in close_data.columns:
+                    df_macro['Close'] = close_data['NQ=F']
+                    df_macro['High'] = data['High']['NQ=F']
+                    df_macro['Low'] = data['Low']['NQ=F']
+                else:
+                    # 선물이 없으면 QQQ로 대체
+                    df_macro['Close'] = close_data['QQQ']
+                    df_macro['High'] = data['High']['QQQ']
+                    df_macro['Low'] = data['Low']['QQQ']
+
+                ticker_map = {'^VIX': 'VIX', '^VIX3M': 'VIX3M', 'DX-Y.NYB': 'DXY', 'SOXX': 'SOXX', 'HYG': 'HYG', '^TNX': 'TNX', '^IRX': 'IRX', 'BTC-USD': 'BTC', 'QQQ': 'QQQ'}
                 for t, col in ticker_map.items():
                     if t in close_data.columns: df_macro[col] = close_data[t]
                 
@@ -150,11 +174,17 @@ class DangerAlertBot:
                         df_stock['Close'] = close_data[ticker]
                         df_stock['High'] = data['High'][ticker]
                         df_stock['Low'] = data['Low'][ticker]
-                        df_stock['Volume'] = data['Volume'][ticker] if 'Volume' in data.columns else 0
                         dfs[ticker] = df_stock.dropna()
+                
+                # 유틸리티 데이터가 개별 종목으로 없어도 ETF(XLU) 데이터는 dfs에 저장
+                if 'XLU' in close_data.columns:
+                    dfs['XLU_DATA'] = pd.DataFrame({'Close': close_data['XLU']})
+
                 return dfs
             return {}
-        except: return {}
+        except Exception as e:
+            print(f"Data Fetch Error: {e}")
+            return {}
 
     def get_fundamental_data(self):
         try:
@@ -195,41 +225,19 @@ class DangerAlertBot:
             
         if news_score < -0.3:
             score += 20
-            reasons.append(f"📰 악재: {wn[:20]}...")
+            reasons.append(f"📰 악재: {wn[:15]}...")
 
         return {"ticker": ticker, "price": curr, "change": chg, "score": min(score, 100), "threshold": params['sell'], "reasons": reasons}
 
-    def analyze_danger(self):
+    def analyze_market_flow(self):
         dfs = self.get_market_data()
         if not dfs or 'MACRO' not in dfs: return
         df = dfs['MACRO']
         
         now = datetime.now() + timedelta(hours=9)
-        weekday = now.weekday()
-        hour = now.hour
-        is_weekend = (weekday == 6) or (weekday == 5 and hour >= 9) or (weekday == 0 and hour < 8)
-
-        live_btc = self.get_realtime_price('BTC-USD')
-        curr_btc = live_btc if live_btc else df['BTC'].iloc[-1]
-        btc_prev = df['BTC'].iloc[-2]
-        btc_chg = (curr_btc - btc_prev) / btc_prev * 100
         
-        news_score, w_title, w_link, w_src, w_sum = self.get_news_sentiment(self.macro_keywords)
-
-        if is_weekend:
-            btc_emoji = "🔥 급등" if btc_chg > 3 else "📉 급락" if btc_chg < -3 else "➡️ 횡보"
-            news_emoji = "😊 호재/중립" if news_score >= -0.2 else "🚨 악재 우세"
-            msg = f"☕ *주말 시장 핵심 브리핑*\n📅 {now.strftime('%Y-%m-%d %H:%M')} (KST)\n\n"
-            msg += f"*1️⃣ 비트코인 (24h Live)*\n• 가격 : ${curr_btc:,.0f} ({btc_chg:+.2f}%)\n• 추세 : {btc_emoji}\n\n"
-            msg += f"*2️⃣ 주말 주요 뉴스*\n• 심리점수 : {news_score:.2f} ({news_emoji})\n"
-            if w_title and news_score < -0.2:
-                cl_title = re.sub(r'[\[\]\*\_]', '', w_title)[:30] + "..."
-                msg += f"  └ 🗞 [{w_src}] [{cl_title}]({w_link})\n"
-                if w_sum: msg += f"    📝 {w_sum}\n"
-            self.send_telegram(msg)
-            return
-
-        # [평일 분석 시작]
+        # [주말 브리핑 로직 생략 - 평일 로직 강화]
+        
         curr = df['Close'].iloc[-1]
         prev = df['Close'].iloc[-2]
         chg = (curr - prev) / prev * 100
@@ -237,60 +245,87 @@ class DangerAlertBot:
         high_52w = df['Close'].rolling(252).max().iloc[-1]
         drawdown = (curr - high_52w) / high_52w * 100
         
+        # 지표 계산
         ma20 = df['Close'].rolling(20).mean().iloc[-1]
         ma50 = df['Close'].rolling(50).mean().iloc[-1]
         ma120 = df['Close'].rolling(120).mean().iloc[-1]
-        
         vix = df['VIX'].iloc[-1]
         vix3m = df['VIX3M'].iloc[-1] if 'VIX3M' in df.columns else vix * 1.1
-        
-        soxx = df['SOXX'].iloc[-1]
-        soxx_chg = (soxx - df['SOXX'].iloc[-2]) / df['SOXX'].iloc[-2] * 100
-        hyg = df['HYG'].iloc[-1]
-        hyg_chg = (hyg - df['HYG'].iloc[-2]) / df['HYG'].iloc[-2] * 100
         
         danger_score = 0
         reasons = []
         
-        # A. 추세
+        # ==========================================================
+        # 1. [NEW STRATEGY] 섹터 로테이션 (Sector Rotation) 감지
+        # ==========================================================
+        try:
+            qqq_curr = df['QQQ'].iloc[-1] if 'QQQ' in df.columns else df['Close'].iloc[-1]
+            qqq_prev = df['QQQ'].iloc[-2] if 'QQQ' in df.columns else df['Close'].iloc[-2]
+            qqq_chg = (qqq_curr - qqq_prev) / qqq_prev * 100
+
+            if 'XLU_DATA' in dfs:
+                xlu_curr = dfs['XLU_DATA']['Close'].iloc[-1]
+                xlu_prev = dfs['XLU_DATA']['Close'].iloc[-2]
+                xlu_chg = (xlu_curr - xlu_prev) / xlu_prev * 100
+            else:
+                xlu_chg = 0
+
+            # 로테이션 정의: 기술주 하락(-0.5% 이하) & 유틸리티 상승(+0.3% 이상)
+            is_rotation = (qqq_chg < -0.5) and (xlu_chg > 0.3)
+            
+            # 시스템 붕괴 정의: 기술주 폭락 & 유틸리티 동반 폭락 (피난처 없음)
+            is_system_crash = (qqq_chg < -2.0) and (xlu_chg < -1.0)
+            
+        except:
+            is_rotation = False
+            is_system_crash = False
+            xlu_chg = 0
+
+        # ==========================================================
+        # 2. 위험 점수 계산 (Scoring Logic)
+        # ==========================================================
+        
+        # A. 기본 추세
         if chg < -1.5: danger_score += W_TREND_MACRO; reasons.append(f"📉 지수 급락 ({chg:.2f}%)")
-        if drawdown < -20: danger_score += 30; reasons.append(f"📉 폭락장 지속 (고점대비 {drawdown:.1f}%)")
-        elif drawdown < -10: danger_score += 15; reasons.append(f"📉 조정장 진입 (고점대비 {drawdown:.1f}%)")
+        if drawdown < -20: danger_score += 30; reasons.append(f"📉 베어마켓 (MDD {drawdown:.1f}%)")
         
-        # B. 공포 (VIX)
-        if vix > vix3m * 1.02: danger_score += 35; reasons.append(f"🚨 VIX 역전 (시스템 위기)")
-        elif vix > 30: danger_score += 20; reasons.append(f"😱 극단적 공포 ({vix:.1f})")
+        # B. 공포지수 (VIX)
+        if vix > vix3m * 1.02: danger_score += 35; reasons.append(f"🚨 VIX 역전 (변동성 폭발)")
+        elif vix > 30: danger_score += 20; reasons.append(f"😱 공포 구간 ({vix:.1f})")
             
-        # C. 매크로
+        # C. 매크로 유동성 (Liquidity)
         dxy_chg = (df['DXY'].iloc[-1] - df['DXY'].iloc[-2]) / df['DXY'].iloc[-2] * 100
-        if dxy_chg > 0.5: danger_score += W_MACRO_MACRO; reasons.append("💵 달러 급등")
+        # [강화] 0.5 -> 0.4로 민감도 상향 (킹달러 경계)
+        if dxy_chg > 0.4: danger_score += 15; reasons.append("💵 달러 급등 (유동성 축소)")
         
-        tnx = df['TNX'].iloc[-1]
-        irx = df['IRX'].iloc[-1]
-        spread = tnx - irx
-        if spread < -0.5: danger_score += 10; reasons.append("⚠️ 금리차 역전 심화")
+        spread = df['TNX'].iloc[-1] - df['IRX'].iloc[-1]
+        if spread < -0.5: danger_score += 10; reasons.append("⚠️ 장단기 금리 역전")
         
-        if news_score < -0.3: danger_score += 15; reasons.append(f"📰 뉴스 심리 악화")
-            
-        # 자산군 위험
-        if btc_chg < -3.0: danger_score += 10; reasons.append(f"📉 비트코인 급락 ({btc_chg:.1f}%)")
-        if soxx_chg < (chg - 1.0): danger_score += 10; reasons.append(f"📉 반도체 상대적 약세")
-        if hyg_chg < -0.5: danger_score += 10; reasons.append(f"⚠️ 하이일드 자금 이탈")
+        # D. 뉴스 심리
+        news_score, w_title, w_link, w_src, w_sum = self.get_news_sentiment(self.macro_keywords)
+        if news_score < -0.3: danger_score += 15; reasons.append(f"📰 거시경제 심리 악화")
 
-        # D. 기술적 역배열
-        if ma20 < ma50 and curr < ma20: danger_score += 25; reasons.append("📉 완전 역배열")
+        # E. 로테이션 반영 (전략적 가감)
+        if is_rotation:
+            danger_score -= 15 # 건전한 조정으로 판단하여 점수 차감
+            reasons.append(f"🔄 섹터 로테이션 (Tech▼ Power▲)")
         
-        # E. 추세 버퍼 (상승장 보호)
-        if curr > ma120: danger_score -= 15
+        if is_system_crash:
+            danger_score += 25 # 피할 곳 없는 하락
+            reasons.append(f"🆘 시스템 붕괴 (Tech & Util 동반 투매)")
 
+        # 경기침체 데이터 확인
         fund = self.get_fundamental_data()
-        if fund and fund['is_recession']: danger_score += 30; reasons.append("🛑 경기 침체 확정")
+        if fund and fund['is_recession']: danger_score += 30; reasons.append("🛑 경기 침체 시그널")
 
         danger_score = max(0, min(danger_score, 100))
         
+        # ==========================================================
+        # 3. 결과 리포팅 (Reporting)
+        # ==========================================================
         status = "🟢 안정"
-        if danger_score >= TH_SELL: status = "🔴 위험 (현금화 권장)"
-        elif danger_score >= TH_BUY: status = "🟡 주의 (비중축소)"
+        if danger_score >= TH_SELL: status = "🔴 위험 (현금확보)"
+        elif danger_score >= TH_BUY: status = "🟡 주의 (방어주 이동)"
         
         stock_results = []
         for t in TARGET_STOCKS:
@@ -299,57 +334,38 @@ class DangerAlertBot:
                 if res: stock_results.append(res)
         stock_results.sort(key=lambda x: x['score'], reverse=True)
 
-        # [메시지 작성 - 상태 텍스트 수정됨]
-        trend_st = "상승(120선 위)✅" if curr > ma120 else "하락(120선 아래)⚠️"
-        vix_st = "역전🚨" if vix > vix3m * 1.02 else "정상✅"
-        spread_st = "역전⚠️" if spread < 0 else "정상✅"
-        recess_st = "침체🛑" if fund and fund['is_recession'] else "정상✅"
+        # 이모지 세팅
+        trend_st = "상승✅" if curr > ma120 else "하락⚠️"
+        xlu_emoji = "🛡️강세" if xlu_chg > 0.5 else "약세"
         
-        nq_emoji = "🔥" if chg > 0.5 else "💧" if chg < -0.5 else "➡️"
-        dxy_st = "⚠️악재" if dxy_chg > 0.2 else "✅호재" if dxy_chg < -0.2 else "➡️"
-        btc_st = "🔥RiskOn" if btc_chg > 1 else "💧RiskOff" if btc_chg < -1 else "➡️"
-
-        # [수정] 반도체/하이일드 보합 조건 추가
-        if soxx_chg > chg + 0.2: soxx_st = "🚀주도"
-        elif soxx_chg < chg - 0.2: soxx_st = "🐢소외"
-        else: soxx_st = "➡️동행"
-
-        if hyg_chg > 0.05: hyg_st = "💰유입"
-        elif hyg_chg < -0.05: hyg_st = "💸이탈"
-        else: hyg_st = "➡️보합"
-
-        msg = f"🔔 *AI 마켓 워치 (v2.1)*\n📅 {now.strftime('%Y-%m-%d %H:%M')} (KST)\n🚦 시장상태: {status} ({danger_score}점)\n\n"
+        msg = f"🏛️ *Wall St. Strategist (v3.0)*\n"
+        msg += f"📅 {now.strftime('%Y-%m-%d %H:%M')} (KST)\n"
+        msg += f"🚦 마켓 국면: {status} ({danger_score}점)\n\n"
         
-        msg += "*1️⃣ 핵심 위험 요인*\n"
+        msg += "*1️⃣ Market Flow (유동성)*\n"
         if reasons: msg += "\n".join(["▪ " + r for r in reasons])
-        else: msg += "▪ 특이사항 없음 (양호)"
+        else: msg += "▪ 특이사항 없음 (Goldilocks)"
         
-        msg += f"\n\n*2️⃣ 매크로 대시보드*\n"
-        msg += f"• 나스닥: {curr:,.0f} ({chg:+.2f}%) {nq_emoji}\n"
-        msg += f"• 추세: {trend_st} | 낙폭: {drawdown:.1f}%\n"
-        msg += f"• VIX구조: {vix_st} ({vix:.1f}/{vix3m:.1f})\n"
-        msg += f"• 달러: {df['DXY'].iloc[-1]:.2f} ({dxy_chg:+.2f}%) {dxy_st}\n"
-        msg += f"• 금리차: {spread:.2f}p ({spread_st})\n"
-        msg += f"• 비트코인: ${curr_btc:,.0f} ({btc_chg:+.2f}%) {btc_st}\n"
-        msg += f"• 반도체: ${df['SOXX'].iloc[-1]:.0f} ({soxx_chg:+.2f}%) {soxx_st}\n"
-        msg += f"• 하이일드: ${df['HYG'].iloc[-1]:.2f} ({hyg_chg:+.2f}%) {hyg_st}\n"
-        
-        if fund: msg += f"• 실업률: {fund['unrate']}% ({recess_st})\n"
+        msg += f"\n\n*2️⃣ Sector Dashboard*\n"
+        msg += f"• Nasdaq(Tech): {curr:,.0f} ({chg:+.2f}%)\n"
+        msg += f"• Utilities(Power): {dfs['XLU_DATA']['Close'].iloc[-1]:.2f} ({xlu_chg:+.2f}%) {xlu_emoji}\n"
+        msg += f"• VIX Term: {'정상✅' if vix < vix3m else '역전🚨'}\n"
+        msg += f"• Dollar Index: {df['DXY'].iloc[-1]:.2f} ({dxy_chg:+.2f}%)\n"
         
         if w_title:
             cl_title = re.sub(r'[\[\]\*\_]', '', w_title)[:25] + "..."
-            src_tag = f"[{w_src}]" if w_src else "[News]"
-            msg += f"\n*3️⃣ 주요 뉴스 심리*\n• 점수: {news_score:.2f}\n• 이슈: {src_tag} [{cl_title}]({w_link})\n"
-            if w_sum: msg += f"  └ 📝 {w_sum}\n"
+            msg += f"\n*3️⃣ Smart Money News*\n• 심리: {news_score:.2f}\n• 헤드라인: [{w_src}] {cl_title}\n"
             
-        msg += "\n*📊 관심 종목 위험도*\n"
+        msg += "\n*📊 Alpha Portfolio Watch*\n"
         for s in stock_results:
             icon = "🔴" if s['score'] >= s['threshold'] else "🟡" if s['score'] >= 40 else "🟢"
-            msg += f"{icon} {s['ticker']}: {s['score']}점 ({s['change']:+.1f}%)\n"
+            # 종목 옆에 섹터 힌트 표시
+            sec_hint = "⚡" if s['ticker'] in ['NEE', 'CEG', 'ETN', 'XLU'] else "💻"
+            msg += f"{icon} {s['ticker']}{sec_hint}: {s['score']}점 ({s['change']:+.1f}%)\n"
             if s['reasons']: msg += f"  └ {', '.join(s['reasons'])}\n"
 
         self.send_telegram(msg)
 
 if __name__ == "__main__":
-    bot = DangerAlertBot()
-    bot.analyze_danger()
+    bot = MarketStrategyBot()
+    bot.analyze_market_flow()
