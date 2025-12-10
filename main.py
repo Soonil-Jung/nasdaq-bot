@@ -50,7 +50,7 @@ TH_BUY = 30
 
 class DangerAlertBot:
     def __init__(self):
-        print("🤖 퀀트봇 v2.1 (Sensitive) 가동 중...")
+        print("🤖 퀀트봇 v2.1 (Sensitive + Detail) 가동 중...")
         try:
             self.tokenizer = BertTokenizer.from_pretrained('ProsusAI/finbert')
             self.model = BertForSequenceClassification.from_pretrained('ProsusAI/finbert')
@@ -210,7 +210,7 @@ class DangerAlertBot:
         hour = now.hour
         is_weekend = (weekday == 6) or (weekday == 5 and hour >= 9) or (weekday == 0 and hour < 8)
 
-        # BTC 데이터 준비 (주말/평일 공용)
+        # BTC 데이터 준비
         live_btc = self.get_realtime_price('BTC-USD')
         curr_btc = live_btc if live_btc else df['BTC'].iloc[-1]
         btc_prev = df['BTC'].iloc[-2]
@@ -335,8 +335,11 @@ class DangerAlertBot:
         msg += f"• 나스닥: {curr:,.0f} ({chg:+.2f}%) {nq_emoji}\n"
         msg += f"• 추세: {trend_st} | 낙폭: {drawdown:.1f}%\n"
         msg += f"• VIX구조: {vix_st} ({vix:.1f}/{vix3m:.1f})\n"
-        msg += f"• 달러: {df['DXY'].iloc[-1]:.2f} ({dxy_chg:+.2f}%) {dxy_st}\n"
-        msg += f"• 금리차: {spread:.2f}p ({spread_st})\n"
+        msg += f"• 달러: {dxy:.2f} ({dxy_chg:+.2f}%) {dxy_st}\n"
+        
+        # [수정된 부분: 금리 상세 표시]
+        msg += f"• 금리차: {spread:.2f}p ({tnx:.2f}%/{irx:.2f}%) {spread_st}\n"
+        
         msg += f"• 비트코인: ${curr_btc:,.0f} ({btc_chg:+.2f}%) {btc_st}\n"
         msg += f"• 반도체: ${df['SOXX'].iloc[-1]:.0f} ({soxx_chg:+.2f}%) {soxx_st}\n"
         msg += f"• 하이일드: ${df['HYG'].iloc[-1]:.2f} ({hyg_chg:+.2f}%) {hyg_st}\n"
