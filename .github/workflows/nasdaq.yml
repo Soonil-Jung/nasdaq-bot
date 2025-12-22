@@ -18,7 +18,7 @@ jobs:
     - name: 파이썬 설정
       uses: actions/setup-python@v4
       with:
-        python-version: '3.9'
+        python-version: '3.11'
 
     - name: 라이브러리 설치 (가벼운 버전 필수!)
       run: |
